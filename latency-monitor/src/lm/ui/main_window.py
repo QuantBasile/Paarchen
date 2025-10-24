@@ -793,14 +793,3 @@ class TradesApp(tk.Tk):
             logger.exception("export_csv outer failed")
 
 
-# ------------------ Run ------------------
-if __name__ == "__main__":
-    try:
-        # Si existe settings.json junto al script, usaremos ese path por defecto
-        default_settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-        df0 = simulate_tsla_quotes(260)
-        app = TradesApp(df0, refresh_ms=3500, settings_path=default_settings_path)
-        app.mainloop()
-    except Exception:
-        logger.exception("Critical failure in main loop")
-        print("Critical error. Check log:", LOG_FILE)

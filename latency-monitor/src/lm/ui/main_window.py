@@ -607,37 +607,102 @@ class TradesApp(tk.Tk):
         try:
             self.ax2.clear()
             if self.df_filtered.empty:
-                self.ax2.set_title("Cumulative PnL (no data)"); self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
+                self.ax2.set_title("Cumulative PnL (no data)")
+                self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
                 self.canvas2.draw_idle(); return
+        
+            # --- Setup
             bucket_s = self._bucket_seconds()
-            df = self.df_filtered.copy(); df["_bucket"] = df["TimeDT"].apply(lambda d: self._time_bucket_label(d, bucket_s))
-            df = df.groupby("_bucket", as_index=False)["PnL"].sum().sort_values("_bucket")
-            xlabels = df["_bucket"].tolist(); pnl = df["PnL"].astype(float).tolist()
-            cum=[]; s=0.0
-            for v in pnl: s+=v; cum.append(s)
-            xs = list(range(len(xlabels))); self.ax2.plot(xs, cum, linewidth=2)
+            bucket = f"{bucket_s}S"
+        
+            df = self.df_filtered.copy()
+            df["TimeDT"] = pd.to_datetime(df["TimeDT"])
+            df["PnL"] = pd.to_numeric(df["PnL"], errors="coerce").fillna(0.0)
+        
+            # --- A) Bucket by datetime (no string labels)
+            df["t_bucket"] = df["TimeDT"].dt.floor(bucket)
+            pnl_by_bucket = (
+                df.groupby("t_bucket", as_index=True)["PnL"]
+                  .sum()
+                  .astype(float)
+                  .sort_index()
+            )
+            cum_sparse = pnl_by_bucket.cumsum()
+        
+            # --- B) Build full linear grid and forward-fill
+            day = df["TimeDT"].iloc[0].date()
+            start = pd.Timestamp(day).replace(hour=8, minute=0, second=0, microsecond=0)
+            end   = pd.Timestamp(day).replace(hour=22, minute=0, second=0, microsecond=0)
+            grid_times = pd.date_range(start, end, freq=bucket)
+        
+            # baseline 0 at session start, then ffill across full grid
+            s0 = pd.Series([0.0], index=[grid_times[0]])
+            cum_full = pd.concat([s0, cum_sparse]).sort_index()
+            cum_ff = cum_full.reindex(grid_times).ffill().fillna(0.0)
+        
+            # --- C) Plot on linear x
+            xs = list(range(len(grid_times)))
+            self.ax2.plot(xs, cum_ff.values.tolist(), linewidth=2)
+        
+            # Labels & cosmetics
+            xlabels = [t.strftime("%H:%M") for t in grid_times]
             self._reduce_xticks(self.ax2, xlabels, max_ticks=6)
-            self.ax2.set_title("Cumulative PnL (filtered)"); self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
-            self.ax2.grid(True, axis="y", alpha=0.2); self.fig2.tight_layout(); self.canvas2.draw_idle()
+        
+            self.ax2.set_title("Cumulative PnL (filtered)")
+            self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
+            self.ax2.grid(True, axis="y", alpha=0.2)
+            self.fig2.tight_layout(); self.canvas2.draw_idle()
         except Exception:
             logger.exception("update_cumulative_pnl failed")
+
 
     def update_trades_over_time(self):
         if not (MATPLOTLIB_OK and self.ax3 and self.canvas3): return
         try:
             self.ax3.clear()
             if self.df_filtered.empty:
-                self.ax3.set_title("Cumulative Trades (no data)"); self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
+                self.ax3.set_title("Cumulative Trades (no data)")
+                self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
                 self.canvas3.draw_idle(); return
+        
+            # --- Setup
             bucket_s = self._bucket_seconds()
-            df = self.df_filtered.copy(); df["_bucket"] = df["TimeDT"].apply(lambda d: self._time_bucket_label(d, bucket_s))
-            counts = df.groupby("_bucket").size().reset_index(name="count").sort_values("_bucket")
-            counts["cum_count"] = counts["count"].cumsum()
-            xlabels = counts["_bucket"].tolist(); xs = list(range(len(xlabels)))
-            self.ax3.plot(xs, counts["cum_count"].tolist(), linewidth=2)
+            bucket = f"{bucket_s}S"
+        
+            df = self.df_filtered.copy()
+            df["TimeDT"] = pd.to_datetime(df["TimeDT"])
+        
+            # --- A) Bucket by datetime and count trades
+            df["t_bucket"] = df["TimeDT"].dt.floor(bucket)
+            counts_sparse = (
+                df.groupby("t_bucket")
+                  .size()
+                  .sort_index()
+            )
+            cum_counts_sparse = counts_sparse.cumsum()
+        
+            # --- B) Full grid + forward-fill
+            day = df["TimeDT"].iloc[0].date()
+            start = pd.Timestamp(day).replace(hour=8, minute=0, second=0, microsecond=0)
+            end   = pd.Timestamp(day).replace(hour=22, minute=0, second=0, microsecond=0)
+            grid_times = pd.date_range(start, end, freq=bucket)
+        
+            # baseline 0 at session start
+            s0 = pd.Series([0], index=[grid_times[0]])
+            cum_counts_full = pd.concat([s0, cum_counts_sparse]).sort_index()
+            cum_counts_ff = cum_counts_full.reindex(grid_times).ffill().fillna(0).astype(int)
+        
+            # --- C) Plot on linear x
+            xs = list(range(len(grid_times)))
+            self.ax3.plot(xs, cum_counts_ff.values.tolist(), linewidth=2)
+        
+            xlabels = [t.strftime("%H:%M") for t in grid_times]
             self._reduce_xticks(self.ax3, xlabels, max_ticks=6)
-            self.ax3.set_title("Cumulative Trades (filtered)"); self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
-            self.ax3.grid(True, axis="y", alpha=0.2); self.fig3.tight_layout(); self.canvas3.draw_idle()
+        
+            self.ax3.set_title("Cumulative Trades (filtered)")
+            self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
+            self.ax3.grid(True, axis="y", alpha=0.2)
+            self.fig3.tight_layout(); self.canvas3.draw_idle()
         except Exception:
             logger.exception("update_trades_over_time failed")
 

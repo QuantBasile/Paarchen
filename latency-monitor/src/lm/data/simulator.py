@@ -35,7 +35,7 @@ def simulate_tsla_quotes(n_rows: int = 240, seed: Optional[int] = None) -> pd.Da
             side = random.choice(sides)
             qty = random.choice([50, 100, 200, 500, 800, 1200])
             exec_price = round(280 + random.random() * 45, 2)
-            pnl = random.randint(-1000, 100)
+            pnl = random.randint(-1000, 100)*0.15
 
             rows.append({
                 "Time": hhmmss,
@@ -46,7 +46,7 @@ def simulate_tsla_quotes(n_rows: int = 240, seed: Optional[int] = None) -> pd.Da
                 "b/s": side,
                 "qty": int(qty),
                 "exec price": float(exec_price),
-                "PnL": int(pnl),
+                "PnL": float(pnl),
                 "TimeDT": tdt,
             })
 

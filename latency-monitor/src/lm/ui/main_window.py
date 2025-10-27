@@ -114,7 +114,6 @@ class TradesApp(tk.Tk):
 
         self.bin_width = tk.StringVar(value="5")   # PnL bin
         self.dt_bin   = tk.StringVar(value="10")   # Δt bin
-        self.group_by = tk.StringVar(value="second")
         self.bis_var  = tk.StringVar(value="")     # NEW: BIS variable editable
 
         # Intenta cargar settings del JSON (si existe)
@@ -187,10 +186,6 @@ class TradesApp(tk.Tk):
 
         # Right controls & charts
         right_ctrl = ttk.Frame(self.right_frame, style="Card.TFrame"); right_ctrl.pack(fill=tk.X, padx=4, pady=(0,8))
-        ttk.Label(right_ctrl, text="Group time by:", font=("Segoe UI",10,"bold")).pack(side=tk.LEFT, padx=(10,6))
-        grp = ttk.Combobox(right_ctrl, state="readonly", width=8, textvariable=self.group_by, values=["second","15s","30s","1min","5min"])
-        grp.pack(side=tk.LEFT, padx=(0,10)); grp.bind("<<ComboboxSelected>>", lambda e: self.update_time_charts())
-
         charts_nb = ttk.Notebook(self.right_frame); charts_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         # PnL distribution
@@ -281,8 +276,7 @@ class TradesApp(tk.Tk):
             "hl_pnl": "0",
             "BIS": "",
             "bin_width": "5",
-            "dt_bin": "10",
-            "group_by": "second"
+            "dt_bin": "10"
         }
 
     def _gather_settings_from_ui(self) -> Dict[str, Any]:
@@ -294,12 +288,9 @@ class TradesApp(tk.Tk):
             "BIS": str(self.bis_var.get()).strip(),
             "bin_width": str(self.bin_width.get()).strip(),
             "dt_bin": str(self.dt_bin.get()).strip(),
-            "group_by": str(self.group_by.get()).strip(),
         }
         # Coerciones mínimas
         if s["refresh_ms"] is None: s["refresh_ms"] = 3500
-        if s["group_by"] not in {"second","15s","30s","1min","5min"}:
-            s["group_by"] = "second"
         return s
 
     def _apply_settings_to_ui(self, s: Dict[str, Any]) -> None:
@@ -314,10 +305,6 @@ class TradesApp(tk.Tk):
         self.bis_var.set(str(s.get("BIS", "")))
         self.bin_width.set(str(s.get("bin_width", "5")))
         self.dt_bin.set(str(s.get("dt_bin", "10")))
-        gb = str(s.get("group_by", "second"))
-        if gb not in {"second","15s","30s","1min","5min"}:
-            gb = "second"
-        self.group_by.set(gb)
 
         # No redibujar si la UI aún no está lista
         if getattr(self, "_ui_ready", False):
@@ -552,15 +539,6 @@ class TradesApp(tk.Tk):
             logger.exception("get_bis failed")
             return ""
 
-    # ---- Time bucketing helpers ----
-    def _bucket_seconds(self) -> int:
-        return {"second":1,"15s":15,"30s":30,"1min":60,"5min":300}.get(self.group_by.get(), 1)
-
-    def _time_bucket_label(self, dt: datetime, bucket_s: int) -> str:
-        sec = int(dt.timestamp()); floored = sec - (sec % bucket_s)
-        d = datetime.fromtimestamp(floored)
-        return d.strftime("%H:%M:%S") if bucket_s < 60 else d.strftime("%H:%M")
-
     def _reduce_xticks(self, ax, labels: List[str], max_ticks: int = 6):
         try:
             if not labels: return
@@ -603,108 +581,172 @@ class TradesApp(tk.Tk):
             logger.exception("update_histogram failed")
 
     def update_cumulative_pnl(self):
-        if not (MATPLOTLIB_OK and self.ax2 and self.canvas2): return
+        if not (MATPLOTLIB_OK and self.ax2 and self.canvas2):
+            return
         try:
+            import matplotlib.dates as mdates
+            import pandas as pd
+    
             self.ax2.clear()
-            if self.df_filtered.empty:
+    
+            # Enmarcar 08–22 aunque no haya datos
+            if self.df_filtered.empty or "TimeDT" not in self.df_filtered.columns or "PnL" not in self.df_filtered.columns:
+                today = pd.Timestamp.today().normalize()
+                start, end = self._day_window_bounds(today)
+                self.ax2.set_xlim(start, end)
                 self.ax2.set_title("Cumulative PnL (no data)")
                 self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
-                self.canvas2.draw_idle(); return
-        
-            # --- Setup
-            bucket_s = self._bucket_seconds()
-            bucket = f"{bucket_s}S"
-        
+                self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax2.grid(True, axis="y", alpha=0.2)
+                self.canvas2.draw_idle()
+                return
+    
             df = self.df_filtered.copy()
-            df["TimeDT"] = pd.to_datetime(df["TimeDT"])
+            df["TimeDT"] = pd.to_datetime(df["TimeDT"], errors="coerce")
             df["PnL"] = pd.to_numeric(df["PnL"], errors="coerce").fillna(0.0)
-        
-            # --- A) Bucket by datetime (no string labels)
-            df["t_bucket"] = df["TimeDT"].dt.floor(bucket)
-            pnl_by_bucket = (
-                df.groupby("t_bucket", as_index=True)["PnL"]
-                  .sum()
-                  .astype(float)
-                  .sort_index()
-            )
-            cum_sparse = pnl_by_bucket.cumsum()
-        
-            # --- B) Build full linear grid and forward-fill
-            day = df["TimeDT"].iloc[0].date()
-            start = pd.Timestamp(day).replace(hour=8, minute=0, second=0, microsecond=0)
-            end   = pd.Timestamp(day).replace(hour=22, minute=0, second=0, microsecond=0)
-            grid_times = pd.date_range(start, end, freq=bucket)
-        
-            # baseline 0 at session start, then ffill across full grid
-            s0 = pd.Series([0.0], index=[grid_times[0]])
-            cum_full = pd.concat([s0, cum_sparse]).sort_index()
-            cum_ff = cum_full.reindex(grid_times).ffill().fillna(0.0)
-        
-            # --- C) Plot on linear x
-            xs = list(range(len(grid_times)))
-            self.ax2.plot(xs, cum_ff.values.tolist(), linewidth=2)
-        
-            # Labels & cosmetics
-            xlabels = [t.strftime("%H:%M") for t in grid_times]
-            self._reduce_xticks(self.ax2, xlabels, max_ticks=6)
-        
-            self.ax2.set_title("Cumulative PnL (filtered)")
+            df = df.dropna(subset=["TimeDT"]).sort_values("TimeDT")
+            if df.empty:
+                today = pd.Timestamp.today().normalize()
+                start, end = self._day_window_bounds(today)
+                self.ax2.set_xlim(start, end)
+                self.ax2.set_title("Cumulative PnL (no data)")
+                self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
+                self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax2.grid(True, axis="y", alpha=0.2)
+                self.canvas2.draw_idle()
+                return
+    
+            # Ventana del día 08–22 del primer trade
+            start_day, end_day = self._day_window_bounds(df["TimeDT"].iloc[0])
+    
+            # Filtra a 08–22
+            df = df[(df["TimeDT"] >= start_day) & (df["TimeDT"] <= end_day)]
+            if df.empty:
+                self.ax2.set_xlim(start_day, end_day)
+                self.ax2.set_title("Cumulative PnL (no data in window)")
+                self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
+                self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax2.grid(True, axis="y", alpha=0.2)
+                self.canvas2.draw_idle()
+                return
+    
+            # === Agrupado FIJO a 1s ===
+            # 1) Coloca índice a segundos (floor) y suma PnL por segundo
+            s = (df.set_index(df["TimeDT"].dt.floor("S"))
+                   .sort_index()
+                   .groupby(level=0)["PnL"].sum())
+    
+            # 2) Reindex SOLO entre primer y último segundo con datos (sin “roll” fuera)
+            first_sec, last_sec = s.index[0], s.index[-1]
+            sec_index = pd.date_range(first_sec, last_sec, freq="1S")
+            s = s.reindex(sec_index, fill_value=0.0)
+    
+            # 3) Acumulado y plot como escalón
+            cum = s.cumsum()
+            self.ax2.plot(cum.index, cum.values, linewidth=2, drawstyle="steps-post")
+    
+            # Eje X fijo 08–22 (línea solo entre first_sec y last_sec)
+            self.ax2.set_xlim(start_day, end_day)
+            self.ax2.set_title("Cumulative PnL (1s grouped)")
             self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
+            self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+            self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
             self.ax2.grid(True, axis="y", alpha=0.2)
-            self.fig2.tight_layout(); self.canvas2.draw_idle()
+            self.fig2.tight_layout()
+            self.canvas2.draw_idle()
+    
         except Exception:
             logger.exception("update_cumulative_pnl failed")
 
 
+    def _day_window_bounds(self, ts: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
+        day = ts.normalize()
+        start = day.replace(hour=8, minute=0, second=0, microsecond=0)
+        end   = day.replace(hour=22, minute=0, second=0, microsecond=0)
+        return start, end
+
+
     def update_trades_over_time(self):
-        if not (MATPLOTLIB_OK and self.ax3 and self.canvas3): return
+        if not (MATPLOTLIB_OK and self.ax3 and self.canvas3):
+            return
         try:
+            import matplotlib.dates as mdates
+            import pandas as pd
+    
             self.ax3.clear()
-            if self.df_filtered.empty:
+    
+            if self.df_filtered.empty or "TimeDT" not in self.df_filtered.columns:
+                today = pd.Timestamp.today().normalize()
+                start, end = self._day_window_bounds(today)
+                self.ax3.set_xlim(start, end)
                 self.ax3.set_title("Cumulative Trades (no data)")
                 self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
-                self.canvas3.draw_idle(); return
-        
-            # --- Setup
-            bucket_s = self._bucket_seconds()
-            bucket = f"{bucket_s}S"
-        
+                self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax3.grid(True, axis="y", alpha=0.2)
+                self.canvas3.draw_idle()
+                return
+    
             df = self.df_filtered.copy()
-            df["TimeDT"] = pd.to_datetime(df["TimeDT"])
-        
-            # --- A) Bucket by datetime and count trades
-            df["t_bucket"] = df["TimeDT"].dt.floor(bucket)
-            counts_sparse = (
-                df.groupby("t_bucket")
-                  .size()
-                  .sort_index()
-            )
-            cum_counts_sparse = counts_sparse.cumsum()
-        
-            # --- B) Full grid + forward-fill
-            day = df["TimeDT"].iloc[0].date()
-            start = pd.Timestamp(day).replace(hour=8, minute=0, second=0, microsecond=0)
-            end   = pd.Timestamp(day).replace(hour=22, minute=0, second=0, microsecond=0)
-            grid_times = pd.date_range(start, end, freq=bucket)
-        
-            # baseline 0 at session start
-            s0 = pd.Series([0], index=[grid_times[0]])
-            cum_counts_full = pd.concat([s0, cum_counts_sparse]).sort_index()
-            cum_counts_ff = cum_counts_full.reindex(grid_times).ffill().fillna(0).astype(int)
-        
-            # --- C) Plot on linear x
-            xs = list(range(len(grid_times)))
-            self.ax3.plot(xs, cum_counts_ff.values.tolist(), linewidth=2)
-        
-            xlabels = [t.strftime("%H:%M") for t in grid_times]
-            self._reduce_xticks(self.ax3, xlabels, max_ticks=6)
-        
-            self.ax3.set_title("Cumulative Trades (filtered)")
+            df["TimeDT"] = pd.to_datetime(df["TimeDT"], errors="coerce")
+            df = df.dropna(subset=["TimeDT"]).sort_values("TimeDT")
+            if df.empty:
+                today = pd.Timestamp.today().normalize()
+                start, end = self._day_window_bounds(today)
+                self.ax3.set_xlim(start, end)
+                self.ax3.set_title("Cumulative Trades (no data)")
+                self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
+                self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax3.grid(True, axis="y", alpha=0.2)
+                self.canvas3.draw_idle()
+                return
+    
+            # Ventana del día 08–22 del primer trade
+            start_day, end_day = self._day_window_bounds(df["TimeDT"].iloc[0])
+    
+            # Filtra 08–22
+            df = df[(df["TimeDT"] >= start_day) & (df["TimeDT"] <= end_day)]
+            if df.empty:
+                self.ax3.set_xlim(start_day, end_day)
+                self.ax3.set_title("Cumulative Trades (no data in window)")
+                self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
+                self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax3.grid(True, axis="y", alpha=0.2)
+                self.canvas3.draw_idle()
+                return
+    
+            # === Agrupado FIJO a 1s ===
+            # 1) Cuenta trades por segundo (floor)
+            counts = (df.set_index(df["TimeDT"].dt.floor("S"))
+                        .sort_index()
+                        .groupby(level=0)["TimeDT"].size())
+    
+            # 2) Reindex SOLO entre primer y último segundo con datos
+            first_sec, last_sec = counts.index[0], counts.index[-1]
+            sec_index = pd.date_range(first_sec, last_sec, freq="1S")
+            counts = counts.reindex(sec_index, fill_value=0)
+    
+            # 3) Acumulado y plot paso a paso
+            cum_counts = counts.cumsum()
+            self.ax3.plot(cum_counts.index, cum_counts.values, linewidth=2, drawstyle="steps-post")
+    
+            self.ax3.set_xlim(start_day, end_day)
+            self.ax3.set_title("Cumulative Trades (1s grouped)")
             self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
+            self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+            self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
             self.ax3.grid(True, axis="y", alpha=0.2)
-            self.fig3.tight_layout(); self.canvas3.draw_idle()
+            self.fig3.tight_layout()
+            self.canvas3.draw_idle()
+    
         except Exception:
             logger.exception("update_trades_over_time failed")
+
 
     def update_dt_hist(self):
         if not (MATPLOTLIB_OK and self.ax4 and self.canvas4): return

@@ -147,20 +147,18 @@ class SummaryTable(ttk.Frame):
 
     def _format_value(self, col: str, val: Any) -> str:
         """
-        Formatea por columna:
-          - Trades → '1,234'
-          - PnL / PnL medio → '1,234.5'
-          - % Trades PnL+ → '53.2%' (si llega como 0.532 -> 53.2%)
-          - Δt medio (s) → '1,234'
+        Reglas:
+          - Columnas de porcentaje (como '% Trades PnL+') → siempre con signo y '%'
+          - Columnas PnL (importe) → siempre con signo y miles, 1 decimal
+          - Enteros (no PnL) → '1,234' (sin signo)
+          - Floats (no PnL) → '+/-1,234.5' si quieres signo genérico; aquí los dejamos sin signo salvo PnL
         """
         try:
-            col_norm = (col or "").lower()
-
-            # Dict rich: no formatear aquí; se tratará en _format_rich_items
+            # Pasar dict rich sin formatear aquí (se trata por _format_rich_items)
             if isinstance(val, dict):
                 return str(val)
-
-            # Intentar parseo robusto
+    
+            # Parseo robusto de cualquier tipo de entrada
             if isinstance(val, (int, float)):
                 x = float(val)
             else:
@@ -168,70 +166,74 @@ class SummaryTable(ttk.Frame):
                 if parsed is None:
                     return str(val)
                 x = parsed
-
-            # Porcentaje
-            if "% trades pnl+" in col_norm or "pnl+" in col_norm:
-                # Si es 0..1 -> pásalo a %
+    
+            col_norm = (col or "").lower()
+    
+            # --- 1) Porcentaje (col de % como '% Trades PnL+') ---
+            if ("% trades pnl+" in col_norm) or ("pnl+" in col_norm and "%" in col_norm):
+                # Si viene en 0..1, pásalo a %
                 if 0.0 <= x <= 1.0:
                     x *= 100.0
-                return f"{x:,.1f}%"
-
-            # Δt (s)
-            if "Δt" in col or "dt" in col_norm or "(s" in col_norm:
-                return f"{x:,.0f}"
-
-            # Trades (entero con miles)
-            if "trade" in col_norm:
-                return f"{int(round(x)):,}"
-
-            # PnL columns
-            if "pnl" in col_norm:
-                return f"{x:,.1f}"
-
-            # Fallback numérico: miles; 1 decimal si no entero
+                sign = "+" if x >= 0 else "−"
+                return f"{sign}{abs(x):,.1f}%"
+    
+            # --- 2) PnL (importe): SIEMPRE signo y miles, 1 decimal ---
+            if ("pnl" in col_norm) and ("pnl+" not in col_norm):
+                sign = "+" if x >= 0 else "−"
+                return f"{sign}{abs(x):,.1f}"
+    
+            # --- 3) Resto de columnas ---
+            # Entero (sin signo, con miles)
             if abs(x - int(x)) < 1e-9:
                 return f"{int(x):,}"
+            # Float genérico (no PnL): miles con 1 decimal (sin signo)
             return f"{x:,.1f}"
+    
         except Exception:
             return str(val)
 
+
+   
+
     def _format_numeric_like(self, col: str, text: str) -> str:
         """
-        Aplica formateo numérico incluso si llega como texto con símbolos,
-        preservando % si lo trae.
+        Igual que _format_value pero partiendo de texto:
+          - % Trades PnL+ → siempre con signo y '%'
+          - PnL (importe) → siempre con signo y miles, 1 decimal
+          - Entero genérico → '1,234' (sin signo)
+          - Float genérico → '1,234.5' (sin signo)
         """
         if text is None:
             return ""
         s = str(text).strip()
         if s == "":
             return s
-
-        # ¿termina en %? -> interpretamos como porcentaje ya expresado
-        has_pct = s.endswith("%")
+    
         parsed = self._parse_number_like(s)
         if parsed is None:
-            # No parece número, devolver tal cual
             return s
-
-        col_norm = (col or "").lower()
+    
         x = parsed
-
-        if has_pct or ("% trades pnl+" in col_norm or "pnl+" in col_norm):
-            # Si viene sin % pero la columna es de porcentaje: 0..1 -> %
-            if not has_pct and 0.0 <= x <= 1.0:
+        col_norm = (col or "").lower()
+    
+        # 1) Porcentaje (col tipo '% Trades PnL+')
+        if ("% trades pnl+" in col_norm) or ("pnl+" in col_norm and "%" in col_norm) or s.endswith("%"):
+            # Si viene 0..1 y SIN '%', pásalo a %
+            if not s.endswith("%") and 0.0 <= x <= 1.0:
                 x *= 100.0
-            return f"{x:,.1f}%"
-
-        if "Δt" in col or "dt" in col_norm or "(s" in col_norm:
-            return f"{x:,.0f}"
-        if "trade" in col_norm:
-            return f"{int(round(x)):,}"
-        if "pnl" in col_norm:
-            return f"{x:,.1f}"
-
+            sign = "+" if x >= 0 else "−"
+            return f"{sign}{abs(x):,.1f}%"
+    
+        # 2) PnL (importe) → SIEMPRE signo
+        if ("pnl" in col_norm) and ("pnl+" not in col_norm):
+            sign = "+" if x >= 0 else "−"
+            return f"{sign}{abs(x):,.1f}"
+    
+        # 3) Genérico
         if abs(x - int(x)) < 1e-9:
             return f"{int(x):,}"
         return f"{x:,.1f}"
+
 
     def _format_rich_items(self, col: str, rich_items: List) -> List[Tuple[str, str]]:
         """
@@ -280,9 +282,12 @@ class SummaryTable(ttk.Frame):
         start_x = x_left + max(0, (width - total_w) // 2)
 
         x = int(start_x)
+        base_font = ("Segoe UI", 10)
+        big_font = ("Segoe UI Semibold", 12)  
         for text, key in rich_items:
             color = color_map.get(str(key), color_map["default"])
-            t = c.create_text(x, y_mid, anchor="w", text=str(text), fill=color, font=font)
+            fnt = big_font if key == "blue" else base_font
+            t = c.create_text(x, y_mid, anchor="w", text=str(text), fill=color, font=fnt)
             bbox = c.bbox(t)
             x = (bbox[2] + 2) if bbox else (x + 10)
 

@@ -18,7 +18,7 @@ if sys.version_info < _MIN_PY:
     raise RuntimeError(f"Python {_MIN_PY[0]}.{_MIN_PY[1]}+ required, got {sys.version.split()[0]}")
 
 # --- Logging setup ---
-LOG_LEVEL = os.getenv("LAT_MON_LOG_LEVEL", "DEBUG").upper()
+LOG_LEVEL = os.getenv("LAT_MON_LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.getenv("LAT_MON_LOG_FILE", "latency_monitor.log")
 logger = logging.getLogger("LatencyMonitor")
 logger.setLevel(getattr(logging, LOG_LEVEL, logging.DEBUG))
@@ -56,6 +56,9 @@ class TradesApp(tk.Tk):
         self._ui_ready = False  # <-- evita redibujar antes de tener widgets
         self.title("Market Maker — Live Latency Monitor")
         self.geometry("1780x1050")
+        self._auto_size_once = True
+        self._header_signature = None   # (tuple(columns), tuple(widths))
+
 
         # --- Settings file path ---
         self.settings_path = settings_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -112,8 +115,6 @@ class TradesApp(tk.Tk):
         self.hl_qty = tk.StringVar(value="800")
         self.hl_pnl = tk.StringVar(value="0")
 
-        self.bin_width = tk.StringVar(value="5")   # PnL bin
-        self.dt_bin   = tk.StringVar(value="10")   # Δt bin
         self.bis_var  = tk.StringVar(value="")     # NEW: BIS variable editable
 
         # Intenta cargar settings del JSON (si existe)
@@ -188,20 +189,6 @@ class TradesApp(tk.Tk):
         right_ctrl = ttk.Frame(self.right_frame, style="Card.TFrame"); right_ctrl.pack(fill=tk.X, padx=4, pady=(0,8))
         charts_nb = ttk.Notebook(self.right_frame); charts_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        # PnL distribution
-        tab_dist = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_dist, text="PnL Distribution")
-        dist_ctrl = ttk.Frame(tab_dist, style="Card.TFrame"); dist_ctrl.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(dist_ctrl, text="Bin width (€):").pack(side=tk.LEFT)
-        e_bin = ttk.Entry(dist_ctrl, width=8, textvariable=self.bin_width); e_bin.pack(side=tk.LEFT, padx=(6,10))
-        e_bin.bind("<Return>", lambda e: self.update_histogram()); e_bin.bind("<FocusOut>", lambda e: self.update_histogram())
-        self.fig1 = self.ax1 = self.canvas1 = None
-        if MATPLOTLIB_OK:
-            try:
-                self.fig1 = Figure(figsize=(5,3.2), dpi=100); self.ax1 = self.fig1.add_subplot(111)
-                self.canvas1 = FigureCanvasTkAgg(self.fig1, master=tab_dist)
-                self.canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
-            except Exception: logger.exception("fig1 init failed")
-
         # Cumulative PnL
         tab_cum = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_cum, text="Cumulative PnL (time)")
         self.fig2 = self.ax2 = self.canvas2 = None
@@ -210,6 +197,7 @@ class TradesApp(tk.Tk):
                 self.fig2 = Figure(figsize=(5,3.2), dpi=100); self.ax2 = self.fig2.add_subplot(111)
                 self.canvas2 = FigureCanvasTkAgg(self.fig2, master=tab_cum)
                 self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+                self._pnl_line = None
             except Exception: logger.exception("fig2 init failed")
 
         # Cumulative Trades
@@ -220,21 +208,9 @@ class TradesApp(tk.Tk):
                 self.fig3 = Figure(figsize=(5,3.2), dpi=100); self.ax3 = self.fig3.add_subplot(111)
                 self.canvas3 = FigureCanvasTkAgg(self.fig3, master=tab_trades)
                 self.canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+                self._trades_line = None
             except Exception: logger.exception("fig3 init failed")
 
-        # Δt Distribution
-        tab_dt = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_dt, text="Δt Distribution")
-        dt_ctrl = ttk.Frame(tab_dt, style="Card.TFrame"); dt_ctrl.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(dt_ctrl, text="Δt bin (s):").pack(side=tk.LEFT)
-        e_dt = ttk.Entry(dt_ctrl, width=8, textvariable=self.dt_bin); e_dt.pack(side=tk.LEFT, padx=(6,10))
-        e_dt.bind("<Return>", lambda e: self.update_dt_hist()); e_dt.bind("<FocusOut>", lambda e: self.update_dt_hist())
-        self.fig4 = self.ax4 = self.canvas4 = None
-        if MATPLOTLIB_OK:
-            try:
-                self.fig4 = Figure(figsize=(5,3.2), dpi=100); self.ax4 = self.fig4.add_subplot(111)
-                self.canvas4 = FigureCanvasTkAgg(self.fig4, master=tab_dt)
-                self.canvas4.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-            except Exception: logger.exception("fig4 init failed")
 
         # ----------- Bottom summaries (UNFILTERED) -----------
         bottom_area = ttk.Notebook(self); bottom_area.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0,12), ipady=4)
@@ -274,9 +250,7 @@ class TradesApp(tk.Tk):
             "refresh_ms": 3500,
             "hl_qty": "800",
             "hl_pnl": "0",
-            "BIS": "",
-            "bin_width": "5",
-            "dt_bin": "10"
+            "BIS": ""
         }
 
     def _gather_settings_from_ui(self) -> Dict[str, Any]:
@@ -286,8 +260,6 @@ class TradesApp(tk.Tk):
             "hl_qty": str(self.hl_qty.get()).strip(),
             "hl_pnl": str(self.hl_pnl.get()).strip(),
             "BIS": str(self.bis_var.get()).strip(),
-            "bin_width": str(self.bin_width.get()).strip(),
-            "dt_bin": str(self.dt_bin.get()).strip(),
         }
         # Coerciones mínimas
         if s["refresh_ms"] is None: s["refresh_ms"] = 3500
@@ -303,8 +275,6 @@ class TradesApp(tk.Tk):
         self.hl_qty.set(str(s.get("hl_qty", "800")))
         self.hl_pnl.set(str(s.get("hl_pnl", "0")))
         self.bis_var.set(str(s.get("BIS", "")))
-        self.bin_width.set(str(s.get("bin_width", "5")))
-        self.dt_bin.set(str(s.get("dt_bin", "10")))
 
         # No redibujar si la UI aún no está lista
         if getattr(self, "_ui_ready", False):
@@ -496,39 +466,64 @@ class TradesApp(tk.Tk):
 
     def update_table(self):
         try:
-            for r in self.tree.get_children(): self.tree.delete(r)
+            # Clear fast
+            for r in self.tree.get_children():
+                self.tree.delete(r)
+    
+            # thresholds once
             hl_qty = safe_float(self.hl_qty.get(), default=float("inf"))
             hl_pnl = safe_float(self.hl_pnl.get(), default=float("inf"))
-
-            for i, (_, row) in enumerate(self.df_filtered.iterrows()):
+    
+            dfv = self.df_filtered  # shorthand
+            if dfv.empty:
+                # also reset KPIs quickly
+                self.kpi_total.config(text="PnL Total: 0 (0)")
+                self.kpi_pos.config(text="PnL +: +0 (0)")
+                self.kpi_neg.config(text="PnL -: 0 (0)")
+                return
+    
+            # Prebuild values row tuples in Python once (fast path)
+            cols = self.DISPLAY_COLS
+            values_rows = dfv[cols].astype(object).values.tolist()  # no per-cell getattr in the loop
+    
+            # Insert rows with a single pass (tags computed once per row)
+            for i, row_vals in enumerate(values_rows):
                 try:
-                    cond_hl = (float(row.get("qty",0)) > float(hl_qty)) and (float(row.get("PnL",-1e18)) > float(hl_pnl))
+                    qty_v = float(row_vals[cols.index("qty")]) if "qty" in cols else 0.0
+                    pnl_v = float(row_vals[cols.index("PnL")]) if "PnL" in cols else -1e18
+                    cond_hl = (qty_v > hl_qty) and (pnl_v > hl_pnl)
                 except Exception:
                     cond_hl = False
                 tags = ("HL",) if cond_hl else (("ROW_EVEN",) if i % 2 == 0 else ("ROW_ODD",))
-                self.tree.insert("", "end", values=[row.get(c,"") for c in self.DISPLAY_COLS], tags=tags)
-
-            for col in self.DISPLAY_COLS:
+                self.tree.insert("", "end", values=row_vals, tags=tags)
+    
+            # Column widths: set a sane default (no O(N) scanning every tick)
+            for col in cols:
                 try:
-                    max_len = max([len(str(col))] + [len(str(v)) for v in self.df_filtered.get(col, pd.Series(dtype=object)).values] + [8])
-                    self.tree.column(col, width=max(90, int(max_len * 9)))
+                    self.tree.column(col, width=max(90, int(9 * max(len(str(col)), 8))), anchor="center")
                 except Exception:
                     pass
-
-            if not self.df_filtered.empty and "PnL" in self.df_filtered.columns:
-                total = float(self.df_filtered["PnL"].sum()); n_total = int(len(self.df_filtered))
-                pos_mask = self.df_filtered["PnL"] > 0; neg_mask = self.df_filtered["PnL"] < 0
-                pos_sum = float(self.df_filtered.loc[pos_mask,"PnL"].sum()); n_pos = int(pos_mask.sum())
-                neg_sum = float(self.df_filtered.loc[neg_mask,"PnL"].sum()); n_neg = int(neg_mask.sum())
+    
+            # KPIs: compute once
+            if "PnL" in dfv.columns:
+                pnl = dfv["PnL"]
+                total = float(pnl.sum()); n_total = int(len(dfv))
+                pos_mask = pnl > 0; neg_mask = pnl < 0
+                pos_sum = float(pnl.loc[pos_mask].sum()); n_pos = int(pos_mask.sum())
+                neg_sum = float(pnl.loc[neg_mask].sum()); n_neg = int(neg_mask.sum())
             else:
                 total = pos_sum = neg_sum = 0.0; n_total = n_pos = n_neg = 0
-
+    
             sign = "+" if total > 0 else ("−" if total < 0 else "")
+            # format once here
             self.kpi_total.config(text=f"PnL Total: {sign}{abs(total):,.0f} ({n_total})")
             self.kpi_pos.config(text=f"PnL +: +{pos_sum:,.0f} ({n_pos})")
             self.kpi_neg.config(text=f"PnL -: {neg_sum:,.0f} ({n_neg})")
+    
         except Exception:
-            logger.exception("update_table failed")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.exception("update_table failed")
+
 
     # ---- BIS accessor (para uso futuro en lógica/funciones) ----
     def get_bis(self) -> str:
@@ -552,33 +547,6 @@ class TradesApp(tk.Tk):
         except Exception:
             logger.exception("reduce_xticks failed")
 
-    # ---- Charts (filtered) ----
-    def update_histogram(self):
-        if not (MATPLOTLIB_OK and self.ax1 and self.canvas1): return
-        try:
-            self.ax1.clear()
-            if self.df_filtered.empty or "PnL" not in self.df_filtered.columns:
-                self.ax1.set_title("PnL distribution (no data)"); self.ax1.set_xlabel("PnL (€)"); self.ax1.set_ylabel("Frequency")
-                self.canvas1.draw_idle(); return
-            bw = safe_float(self.bin_width.get(), 5.0) or 5.0
-            if bw <= 0: bw = 5.0
-            vals = [float(x) for x in self.df_filtered["PnL"].dropna().tolist()]
-            vmin, vmax = min(vals), max(vals); start = math.floor(vmin/bw)*bw; end = math.ceil(vmax/bw)*bw
-            if end == start: end = start + bw
-            n_bins = max(1, int(round((end-start)/bw))); edges = [start + i*bw for i in range(n_bins+1)]
-            counts = [0]*n_bins
-            for v in vals:
-                idx = int((v-start)//bw); idx = 0 if idx<0 else (n_bins-1 if idx>=n_bins else idx)
-                counts[idx] += 1
-            self.ax1.bar(edges[:-1], counts, width=bw, align="edge", alpha=0.9)
-            mean = sum(vals)/len(vals); var = sum((x-mean)**2 for x in vals)/len(vals); std = math.sqrt(var)
-            self.ax1.axvline(mean, linestyle="--", linewidth=2, label=f"mean = {mean:.1f}")
-            self.ax1.axvline(mean-std, linestyle=":", linewidth=1.5, label=f"std = {std:.1f}"); self.ax1.axvline(mean+std, linestyle=":", linewidth=1.5)
-            self.ax1.set_title("PnL distribution (filtered)"); self.ax1.set_xlabel("PnL (€)"); self.ax1.set_ylabel("Frequency")
-            self.ax1.legend(loc="upper right"); self.ax1.grid(True, axis="y", alpha=0.2)
-            self.fig1.tight_layout(); self.canvas1.draw_idle()
-        except Exception:
-            logger.exception("update_histogram failed")
 
     def update_cumulative_pnl(self):
         if not (MATPLOTLIB_OK and self.ax2 and self.canvas2):
@@ -587,18 +555,25 @@ class TradesApp(tk.Tk):
             import matplotlib.dates as mdates
             import pandas as pd
     
-            self.ax2.clear()
-    
-            # Enmarcar 08–22 aunque no haya datos
-            if self.df_filtered.empty or "TimeDT" not in self.df_filtered.columns or "PnL" not in self.df_filtered.columns:
-                today = pd.Timestamp.today().normalize()
-                start, end = self._day_window_bounds(today)
-                self.ax2.set_xlim(start, end)
-                self.ax2.set_title("Cumulative PnL (no data)")
-                self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
+            # lazy axis init (titles/formatters once)
+            if getattr(self, "_ax2_inited", False) is False:
+                self.ax2.set_title("Cumulative PnL (1s grouped)")
+                self.ax2.set_xlabel("Time")
+                self.ax2.set_ylabel("PnL cumulative (€)")
                 self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
                 self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
                 self.ax2.grid(True, axis="y", alpha=0.2)
+                self._ax2_inited = True
+    
+            # No data? keep axis, just clear the line
+            if self.df_filtered.empty or "TimeDT" not in self.df_filtered.columns or "PnL" not in self.df_filtered.columns:
+                # set a stable x window for today 08–22
+                today = pd.Timestamp.today().normalize()
+                start, end = self._day_window_bounds(today)
+                self.ax2.set_xlim(start, end)
+                if self._pnl_line is None:
+                    (self._pnl_line,) = self.ax2.plot([], [], linewidth=2, drawstyle="steps-post")
+                self._pnl_line.set_data([], [])
                 self.canvas2.draw_idle()
                 return
     
@@ -610,56 +585,50 @@ class TradesApp(tk.Tk):
                 today = pd.Timestamp.today().normalize()
                 start, end = self._day_window_bounds(today)
                 self.ax2.set_xlim(start, end)
-                self.ax2.set_title("Cumulative PnL (no data)")
-                self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
-                self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
-                self.ax2.grid(True, axis="y", alpha=0.2)
+                if self._pnl_line is None:
+                    (self._pnl_line,) = self.ax2.plot([], [], linewidth=2, drawstyle="steps-post")
+                self._pnl_line.set_data([], [])
                 self.canvas2.draw_idle()
                 return
     
-            # Ventana del día 08–22 del primer trade
+            # Window 08–22 of the day of first trade
             start_day, end_day = self._day_window_bounds(df["TimeDT"].iloc[0])
-    
-            # Filtra a 08–22
             df = df[(df["TimeDT"] >= start_day) & (df["TimeDT"] <= end_day)]
             if df.empty:
                 self.ax2.set_xlim(start_day, end_day)
-                self.ax2.set_title("Cumulative PnL (no data in window)")
-                self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
-                self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
-                self.ax2.grid(True, axis="y", alpha=0.2)
+                if self._pnl_line is None:
+                    (self._pnl_line,) = self.ax2.plot([], [], linewidth=2, drawstyle="steps-post")
+                self._pnl_line.set_data([], [])
                 self.canvas2.draw_idle()
                 return
     
-            # === Agrupado FIJO a 1s ===
-            # 1) Coloca índice a segundos (floor) y suma PnL por segundo
-            s = (df.set_index(df["TimeDT"].dt.floor("S"))
-                   .sort_index()
-                   .groupby(level=0)["PnL"].sum())
+            # 1s grouping via resample
+            s = (df.set_index("TimeDT")["PnL"]
+                    .resample("1S", origin="start_day").sum()
+                    .sort_index())
     
-            # 2) Reindex SOLO entre primer y último segundo con datos (sin “roll” fuera)
+            # Reindex strictly between first & last second with data
             first_sec, last_sec = s.index[0], s.index[-1]
             sec_index = pd.date_range(first_sec, last_sec, freq="1S")
             s = s.reindex(sec_index, fill_value=0.0)
     
-            # 3) Acumulado y plot como escalón
+            # cumulative series (no clears; reuse the line)
             cum = s.cumsum()
-            self.ax2.plot(cum.index, cum.values, linewidth=2, drawstyle="steps-post")
+            if self._pnl_line is None:
+                (self._pnl_line,) = self.ax2.plot(cum.index, cum.values, linewidth=2, drawstyle="steps-post")
+            else:
+                self._pnl_line.set_data(cum.index, cum.values)
     
-            # Eje X fijo 08–22 (línea solo entre first_sec y last_sec)
+            # Keep x axis fixed 08–22, line only spans [first_sec, last_sec]
             self.ax2.set_xlim(start_day, end_day)
-            self.ax2.set_title("Cumulative PnL (1s grouped)")
-            self.ax2.set_xlabel("Time"); self.ax2.set_ylabel("PnL cumulative (€)")
-            self.ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-            self.ax2.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
-            self.ax2.grid(True, axis="y", alpha=0.2)
             self.fig2.tight_layout()
             self.canvas2.draw_idle()
     
         except Exception:
-            logger.exception("update_cumulative_pnl failed")
+            # trimmed logging on hot path
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.exception("update_cumulative_pnl failed")
+
 
 
     def _day_window_bounds(self, ts: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -676,17 +645,23 @@ class TradesApp(tk.Tk):
             import matplotlib.dates as mdates
             import pandas as pd
     
-            self.ax3.clear()
+            # lazy axis init once
+            if getattr(self, "_ax3_inited", False) is False:
+                self.ax3.set_title("Cumulative Trades (time)")
+                self.ax3.set_xlabel("Time")
+                self.ax3.set_ylabel("Trades (cum)")
+                self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax3.grid(True, axis="y", alpha=0.2)
+                self._ax3_inited = True
     
             if self.df_filtered.empty or "TimeDT" not in self.df_filtered.columns:
                 today = pd.Timestamp.today().normalize()
                 start, end = self._day_window_bounds(today)
                 self.ax3.set_xlim(start, end)
-                self.ax3.set_title("Cumulative Trades (no data)")
-                self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
-                self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
-                self.ax3.grid(True, axis="y", alpha=0.2)
+                if self._trades_line is None:
+                    (self._trades_line,) = self.ax3.plot([], [], linewidth=2, drawstyle="steps-post")
+                self._trades_line.set_data([], [])
                 self.canvas3.draw_idle()
                 return
     
@@ -697,84 +672,45 @@ class TradesApp(tk.Tk):
                 today = pd.Timestamp.today().normalize()
                 start, end = self._day_window_bounds(today)
                 self.ax3.set_xlim(start, end)
-                self.ax3.set_title("Cumulative Trades (no data)")
-                self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
-                self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
-                self.ax3.grid(True, axis="y", alpha=0.2)
+                if self._trades_line is None:
+                    (self._trades_line,) = self.ax3.plot([], [], linewidth=2, drawstyle="steps-post")
+                self._trades_line.set_data([], [])
                 self.canvas3.draw_idle()
                 return
     
-            # Ventana del día 08–22 del primer trade
             start_day, end_day = self._day_window_bounds(df["TimeDT"].iloc[0])
-    
-            # Filtra 08–22
             df = df[(df["TimeDT"] >= start_day) & (df["TimeDT"] <= end_day)]
             if df.empty:
                 self.ax3.set_xlim(start_day, end_day)
-                self.ax3.set_title("Cumulative Trades (no data in window)")
-                self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
-                self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-                self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
-                self.ax3.grid(True, axis="y", alpha=0.2)
+                if self._trades_line is None:
+                    (self._trades_line,) = self.ax3.plot([], [], linewidth=2, drawstyle="steps-post")
+                self._trades_line.set_data([], [])
                 self.canvas3.draw_idle()
                 return
     
-            # === Agrupado FIJO a 1s ===
-            # 1) Cuenta trades por segundo (floor)
+            # 1s counts, then cumulative
             counts = (df.set_index(df["TimeDT"].dt.floor("S"))
                         .sort_index()
                         .groupby(level=0)["TimeDT"].size())
-    
-            # 2) Reindex SOLO entre primer y último segundo con datos
             first_sec, last_sec = counts.index[0], counts.index[-1]
             sec_index = pd.date_range(first_sec, last_sec, freq="1S")
             counts = counts.reindex(sec_index, fill_value=0)
+            cum = counts.cumsum()
     
-            # 3) Acumulado y plot paso a paso
-            cum_counts = counts.cumsum()
-            self.ax3.plot(cum_counts.index, cum_counts.values, linewidth=2, drawstyle="steps-post")
+            if self._trades_line is None:
+                (self._trades_line,) = self.ax3.plot(cum.index, cum.values, linewidth=2, drawstyle="steps-post")
+            else:
+                self._trades_line.set_data(cum.index, cum.values)
     
             self.ax3.set_xlim(start_day, end_day)
-            self.ax3.set_title("Cumulative Trades (1s grouped)")
-            self.ax3.set_xlabel("Time"); self.ax3.set_ylabel("Trades (cum)")
-            self.ax3.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-            self.ax3.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
-            self.ax3.grid(True, axis="y", alpha=0.2)
             self.fig3.tight_layout()
             self.canvas3.draw_idle()
     
         except Exception:
-            logger.exception("update_trades_over_time failed")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.exception("update_trades_over_time failed")
 
 
-    def update_dt_hist(self):
-        if not (MATPLOTLIB_OK and self.ax4 and self.canvas4): return
-        try:
-            self.ax4.clear()
-            if self.df_filtered.empty or "inc_t_s" not in self.df_filtered.columns:
-                self.ax4.set_title("Δt distribution (no data)"); self.ax4.set_xlabel("Δt (s)"); self.ax4.set_ylabel("Frequency")
-                self.canvas4.draw_idle(); return
-            bw = safe_float(self.dt_bin.get(), 10.0) or 10.0
-            if bw <= 0: bw = 10.0
-            vals = [float(x) for x in self.df_filtered["inc_t_s"].dropna().tolist()]
-            vmin, vmax = min(vals), max(vals); start = math.floor(vmin/bw)*bw; end = math.ceil(vmax/bw)*bw
-            if end == start: end = start + bw
-            n_bins = max(1, int(round((end-start)/bw))); edges=[start+i*bw for i in range(n_bins+1)]
-            counts=[0]*n_bins
-            for v in vals:
-                idx = int((v-start)//bw); idx = 0 if idx<0 else (n_bins-1 if idx>=n_bins else idx)
-                counts[idx]+=1
-            self.ax4.bar(edges[:-1], counts, width=bw, align="edge", alpha=0.9)
-            mean = sum(vals)/len(vals); var = sum((x-mean)**2 for x in vals)/len(vals); std = math.sqrt(var)
-            self.ax4.axvline(mean, linestyle="--", linewidth=2, label=f"mean = {mean:.1f}s")
-            self.ax4.axvline(mean-std, linestyle=":", linewidth=1.5, label=f"std = {std:.1f}s")
-            self.ax4.axvline(mean+std, linestyle=":", linewidth=1.5)
-            self.ax4.set_title("Δt distribution (filtered)"); self.ax4.set_xlabel("Δt (s)"); self.ax4.set_ylabel("Frequency")
-            self.ax4.legend(loc="upper right"); self.ax4.grid(True, axis="y", alpha=0.2)
-            self.fig4.tight_layout(); self.canvas4.draw_idle()
-        except Exception:
-            logger.exception("update_dt_hist failed")
 
     def update_time_charts(self):
         self.update_cumulative_pnl(); self.update_trades_over_time()
@@ -855,7 +791,8 @@ class TradesApp(tk.Tk):
             logger.exception("sort_main_by failed for %s", col)
 
     def update_all_views(self):
-        self.update_table(); self.update_histogram(); self.update_cumulative_pnl(); self.update_trades_over_time(); self.update_dt_hist()
+        self.update_table(); self.update_cumulative_pnl(); self.update_trades_over_time()
+
 
     def refresh_data(self):
         try:

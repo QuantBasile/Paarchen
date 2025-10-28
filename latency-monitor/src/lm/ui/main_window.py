@@ -56,8 +56,6 @@ class TradesApp(tk.Tk):
         self._ui_ready = False  # <-- evita redibujar antes de tener widgets
         self.title("Market Maker — Live Latency Monitor")
         self.geometry("1780x1050")
-        self._auto_size_once = True
-        self._header_signature = None   # (tuple(columns), tuple(widths))
 
 
         # --- Settings file path ---
@@ -125,15 +123,16 @@ class TradesApp(tk.Tk):
         ttk.Label(banner, text="Live Latency Monitor", font=("Segoe UI Semibold",16)).pack(side=tk.LEFT)
         ttk.Label(banner, text="Open-end KOs — Detección de capturas por latencia", foreground="#555").pack(side=tk.LEFT, padx=12)
 
-        top_area = ttk.Panedwindow(self, orient=tk.HORIZONTAL); top_area.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
-        self.left_frame = ttk.Frame(top_area, style="Root.TFrame"); top_area.add(self.left_frame, weight=3)
-        self.right_frame = ttk.Frame(top_area, style="Root.TFrame"); top_area.add(self.right_frame, weight=2)
-
+        self.left_frame = ttk.Frame(self, style="Root.TFrame")
+        self.left_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        
         # Controls
-        ctrl_card = ttk.Frame(self.left_frame, style="Card.TFrame"); ctrl_card.pack(fill=tk.X, padx=4, pady=(0,8))
+        ctrl_card = ttk.Frame(self.left_frame, style="Card.TFrame")
+        ctrl_card.pack(fill=tk.X, padx=4, pady=(0,8))
         ttk.Label(ctrl_card, text="Refresh (ms):").pack(side=tk.LEFT, padx=(10,6))
         self.refresh_entry = ttk.Entry(ctrl_card, width=8, textvariable=self.refresh_ms); self.refresh_entry.pack(side=tk.LEFT, padx=(0,10))
         self.btn_freeze = ttk.Button(ctrl_card, text="⏸ Freeze", command=self.toggle_run); self.btn_freeze.pack(side=tk.LEFT, padx=4)
+
 
         # NEW: BIS control
         ttk.Label(ctrl_card, text="BIS:").pack(side=tk.LEFT, padx=(16,6))
@@ -185,35 +184,20 @@ class TradesApp(tk.Tk):
                                 bg=self.PALETTE["kpi_neg"], fg=self.PALETTE["kpi_neg_txt"], padx=12, pady=6)
         self.kpi_neg.pack(side=tk.RIGHT, padx=(8,10)); self.kpi_pos.pack(side=tk.RIGHT, padx=8); self.kpi_total.pack(side=tk.RIGHT, padx=8)
 
-        # Right controls & charts
-        right_ctrl = ttk.Frame(self.right_frame, style="Card.TFrame"); right_ctrl.pack(fill=tk.X, padx=4, pady=(0,8))
-        charts_nb = ttk.Notebook(self.right_frame); charts_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
-        # Cumulative PnL
-        tab_cum = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_cum, text="Cumulative PnL (time)")
-        self.fig2 = self.ax2 = self.canvas2 = None
-        if MATPLOTLIB_OK:
-            try:
-                self.fig2 = Figure(figsize=(5,3.2), dpi=100); self.ax2 = self.fig2.add_subplot(111)
-                self.canvas2 = FigureCanvasTkAgg(self.fig2, master=tab_cum)
-                self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-                self._pnl_line = None
-            except Exception: logger.exception("fig2 init failed")
-
-        # Cumulative Trades
-        tab_trades = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_trades, text="Cumulative Trades (time)")
-        self.fig3 = self.ax3 = self.canvas3 = None
-        if MATPLOTLIB_OK:
-            try:
-                self.fig3 = Figure(figsize=(5,3.2), dpi=100); self.ax3 = self.fig3.add_subplot(111)
-                self.canvas3 = FigureCanvasTkAgg(self.fig3, master=tab_trades)
-                self.canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-                self._trades_line = None
-            except Exception: logger.exception("fig3 init failed")
+        
 
 
         # ----------- Bottom summaries (UNFILTERED) -----------
-        bottom_area = ttk.Notebook(self); bottom_area.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0,12), ipady=4)
+        # ----------- Área inferior dividida: [Summary (2/3) | Charts (1/3)] -----------
+        bottom_split = ttk.Panedwindow(self, orient=tk.HORIZONTAL); bottom_split.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0,12))
+        left_summary = ttk.Frame(bottom_split, style="Root.TFrame")
+        right_charts = ttk.Frame(bottom_split, style="Root.TFrame")
+        bottom_split.add(left_summary, weight=2)   # 2/3
+        bottom_split.add(right_charts, weight=1)   # 1/3
+
+        # Summary tables a la izquierda (Notebook)
+        bottom_area = ttk.Notebook(left_summary); bottom_area.pack(fill=tk.BOTH, expand=True, padx=0, pady=0, ipady=4)
+        
         self.summary_cols = ["Key","Trades","% Trades PnL+","Δt medio (s)","PnL medio","PnL"]
         col_weights = {"Key":2.2,"Trades":1.7,"% Trades PnL+":1.2,"Δt medio (s)":1.2,"PnL medio":1.2,"PnL":2.0}
         min_col_widths = {"Key":240,"Trades":180,"% Trades PnL+":140,"Δt medio (s)":140,"PnL medio":130,"PnL":200}
@@ -232,6 +216,32 @@ class TradesApp(tk.Tk):
         tab_nombre = ttk.Frame(bottom_area, style="Card.TFrame"); bottom_area.add(tab_nombre, text="Global — Nombres")
         self.nombre_table = SummaryTable(tab_nombre, columns=self.summary_cols, col_weights=col_weights, min_col_widths=min_col_widths, bg="white")
         self.nombre_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        
+        # Charts a la derecha (Notebook)
+        charts_nb = ttk.Notebook(right_charts); charts_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # Cumulative PnL (abajo-derecha)
+        tab_cum = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_cum, text="Cumulative PnL (time)")
+        self.fig2 = self.ax2 = self.canvas2 = None
+        if MATPLOTLIB_OK:
+            try:
+                self.fig2 = Figure(figsize=(5,3.2), dpi=100); self.ax2 = self.fig2.add_subplot(111)
+                self.canvas2 = FigureCanvasTkAgg(self.fig2, master=tab_cum)
+                self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+                self._pnl_line = None
+            except Exception: logger.exception("fig2 init failed")
+
+        # Cumulative Trades (abajo-derecha)
+        tab_trades = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_trades, text="Cumulative Trades (time)")
+        self.fig3 = self.ax3 = self.canvas3 = None
+        if MATPLOTLIB_OK:
+            try:
+                self.fig3 = Figure(figsize=(5,3.2), dpi=100); self.ax3 = self.fig3.add_subplot(111)
+                self.canvas3 = FigureCanvasTkAgg(self.fig3, master=tab_trades)
+                self.canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+                self._trades_line = None
+            except Exception: logger.exception("fig3 init failed")
 
         # Marcar UI como lista y hacer primer render
         self._ui_ready = True

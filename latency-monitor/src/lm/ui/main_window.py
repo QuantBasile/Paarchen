@@ -5,6 +5,7 @@ from datetime import datetime
 
 from lm.utils.numbers import safe_float, safe_int, signed_text
 from lm.utils.debounce import Debouncer
+from lm.utils.popup import popup_df_simple
 from lm.ui.summary_table import SummaryTable
 from lm.data.provider import DataProvider
 
@@ -56,7 +57,7 @@ class TradesApp(tk.Tk):
         self._ui_ready = False  # <-- evita redibujar antes de tener widgets
         self.title("Market Maker — Live Latency Monitor")
         self.geometry("1780x1050")
-
+        
 
         # --- Settings file path ---
         self.settings_path = settings_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -91,6 +92,7 @@ class TradesApp(tk.Tk):
             style.configure("Root.TFrame", background=self.PALETTE["bg"])
         except Exception:
             logger.exception("ttk style config failed")
+            
 
         # ---------- STATE ----------
         df = self.provider.fetch()
@@ -153,6 +155,12 @@ class TradesApp(tk.Tk):
         e_hl_pnl = ttk.Entry(hl_card, width=8, textvariable=self.hl_pnl)
         e_hl_pnl.pack(side=tk.LEFT, padx=(0,12)); e_hl_pnl.bind("<Return>", lambda e: self.update_all_views()); e_hl_pnl.bind("<FocusOut>", lambda e: self.update_all_views())
         ttk.Label(hl_card, text="(Only rows meeting both are highlighted)", foreground="#666").pack(side=tk.LEFT, padx=(8,0))
+
+        # --- Popup toggle (simple) ---
+        self.popups_enabled = getattr(self, "popups_enabled", None) or tk.BooleanVar(value=True)
+        ttk.Checkbutton(hl_card, text="Popup", variable=self.popups_enabled).pack(side=tk.LEFT, padx=(10,6))
+
+
 
         # Dynamic filters
         filters_card = ttk.Frame(self.left_frame, style="Card.TFrame"); filters_card.pack(fill=tk.X, padx=4, pady=(0,8))
@@ -810,6 +818,32 @@ class TradesApp(tk.Tk):
                 self.df_all = self.provider.fetch()
                 self.apply_dynamic_filters()
                 self.update_global_summaries()
+                
+                if self.popups_enabled.get() and self.df_all is not None and not self.df_all.empty:
+                    cfg = getattr(self, "cfg", None)
+                    th_pnl = getattr(cfg, "highlight_abs_pnl", 5000)
+                
+                    pnl_col = "PnL"
+                
+                    # Máscara de highlight (vectorizada)
+                    mask = pd.Series(False, index=self.df_all.index)
+                    if pnl_col in self.df_all.columns:
+                        mask |= self.df_all[pnl_col].abs() < th_pnl
+                
+                    alert_df = self.df_all[mask]
+                
+                    if not alert_df.empty:
+                        popup_df_simple(
+                            self.winfo_toplevel(),
+                            alert_df,
+                            name_col="symbol",   # ajusta si usas otro nombre
+                            isin_col="isin",
+                            pnl_col="pnl",
+                            ms=8000,             # duración (0/None = solo con OK)
+                            title="🚨 Trades destacados")
+
+             
+
         except Exception:
             logger.exception("refresh_data failed")
         finally:
@@ -818,7 +852,7 @@ class TradesApp(tk.Tk):
     def _safe_refresh_ms(self) -> int:
         try: ms = int(self.refresh_ms.get())
         except Exception: ms = 5000
-        return max(200, min(ms, 30000))
+        return max(2000, min(ms, 30000)) #min 2 secs
 
     def toggle_run(self):
         try:

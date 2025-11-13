@@ -2,16 +2,20 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import logging, os, json, math
 from datetime import datetime
+import matplotlib.dates as mdates
 
 from lm.utils.numbers import safe_float, safe_int, signed_text
 from lm.utils.debounce import Debouncer
 from lm.utils.popup import popup_df_simple
 from lm.ui.summary_table import SummaryTable
 from lm.data.provider import DataProvider
+from lm.ui.summary_table import CounterpartyVolumeTable
 
 import sys
 from typing import Optional, Dict, List, Tuple, Any
 from logging.handlers import RotatingFileHandler
+from matplotlib.ticker import FuncFormatter
+
 
 # --- Python version check ---
 _MIN_PY = (3, 9)
@@ -181,9 +185,44 @@ class TradesApp(tk.Tk):
         self.tree.tag_configure("ROW_EVEN", background=self.PALETTE["row_even"])
         self.tree.tag_configure("ROW_ODD", background=self.PALETTE["row_odd"])
         self.tree.tag_configure("HL", background=self.PALETTE["hl"])
+        
 
         # KPIs
         kpi_card = ttk.Frame(self.left_frame, style="Root.TFrame"); kpi_card.pack(fill=tk.X, padx=4, pady=(0,6))
+        
+        # Contenedores dentro del KPI CARD
+        self.kpi_left_box = ttk.Frame(kpi_card, style="Root.TFrame")
+        self.kpi_left_box.pack(side=tk.LEFT, padx=8)
+        
+        self.kpi_right_box = ttk.Frame(kpi_card, style="Root.TFrame")
+        self.kpi_right_box.pack(side=tk.RIGHT, padx=8)
+
+        #contenedor izquierda
+        self.kpi_total_trades = tk.Label(
+        self.kpi_left_box, text="Total Trades: 0",
+            font=("Segoe UI",11), bg=self.PALETTE["kpi_neu"]
+        )
+        self.kpi_total_trades.pack(side=tk.LEFT, padx=(10,20))
+        
+        self.kpi_total_volume = tk.Label(
+            self.kpi_left_box, text="Total Volume: 0",
+            font=("Segoe UI",11), bg=self.PALETTE["kpi_neu"]
+        )
+        self.kpi_total_volume.pack(side=tk.LEFT, padx=(10,20))
+        
+        self.kpi_parchen_trades = tk.Label(
+            self.kpi_left_box, text="Parchen Trades: 0",
+            font=("Segoe UI",11), bg=self.PALETTE["kpi_neu"]
+        )
+        self.kpi_parchen_trades.pack(side=tk.LEFT, padx=(10,20))
+        
+        self.kpi_parchen_volume = tk.Label(
+            self.kpi_left_box, text="Parchen Volume: 0",
+            font=("Segoe UI",11), bg=self.PALETTE["kpi_neu"]
+        )
+        self.kpi_parchen_volume.pack(side=tk.LEFT, padx=(10,20))
+
+        #contenedor derecha        
         self.kpi_total = tk.Label(kpi_card, text="", font=("Segoe UI Semibold",11),
                                   bg=self.PALETTE["kpi_neu"], fg=self.PALETTE["kpi_neu_txt"], padx=12, pady=6)
         self.kpi_pos = tk.Label(kpi_card, text="", font=("Segoe UI",11),
@@ -192,7 +231,10 @@ class TradesApp(tk.Tk):
                                 bg=self.PALETTE["kpi_neg"], fg=self.PALETTE["kpi_neg_txt"], padx=12, pady=6)
         self.kpi_neg.pack(side=tk.RIGHT, padx=(8,10)); self.kpi_pos.pack(side=tk.RIGHT, padx=8); self.kpi_total.pack(side=tk.RIGHT, padx=8)
 
-        
+        self.kpi_neg.pack(in_=self.kpi_right_box, side=tk.RIGHT, padx=(8,10))
+        self.kpi_pos.pack(in_=self.kpi_right_box, side=tk.RIGHT, padx=8)
+        self.kpi_total.pack(in_=self.kpi_right_box, side=tk.RIGHT, padx=8)
+
 
 
         # ----------- Bottom summaries (UNFILTERED) -----------
@@ -225,6 +267,42 @@ class TradesApp(tk.Tk):
         self.nombre_table = SummaryTable(tab_nombre, columns=self.summary_cols, col_weights=col_weights, min_col_widths=min_col_widths, bg="white")
         self.nombre_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
+        # Nueva tabla: volumen y market share por counterparty
+        tab_cp = ttk.Frame(bottom_area, style="Card.TFrame")
+        bottom_area.add(tab_cp, text="Per CP — Volume share")
+        
+        cp_cols = [
+             "Counterparty",
+             "Vol TSLA","Marktanteil TSLA",
+             "Vol NVDA","Marktanteil NVDA",
+             "Vol Other","Marktanteil Other",
+             "Marktanteil Total",
+         ]
+         
+        cp_weights = {
+             "Counterparty": 2.2,
+             "Vol TSLA":1.4, "Marktanteil TSLA":1.2,
+             "Vol NVDA":1.4, "Marktanteil NVDA":1.2,
+             "Vol Other":1.4, "Marktanteil Other":1.2,
+             "Marktanteil Total":1.4,
+         }
+         
+        cp_min = {c:140 for c in cp_cols}
+        cp_min["Counterparty"] = 200
+         
+        self.cp_table = CounterpartyVolumeTable(
+             tab_cp,
+             columns=cp_cols,
+             bucket_col="nombre",          # <--- AHORA agrupas por nombre
+             main_values=("TSLA", "NVDA"), # <--- tus dos tipos principales
+             col_weights=cp_weights,
+             min_col_widths=cp_min,
+             bg="white",
+         )
+        self.cp_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+
+        
         
         # Charts a la derecha (Notebook)
         charts_nb = ttk.Notebook(right_charts); charts_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -250,6 +328,22 @@ class TradesApp(tk.Tk):
                 self.canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
                 self._trades_line = None
             except Exception: logger.exception("fig3 init failed")
+            
+            
+        # Volume over time (abajo-derecha)
+        tab_vol = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_vol, text="Volume (time)")
+        self.fig4 = self.ax4 = self.canvas4 = None
+        if MATPLOTLIB_OK:
+            try:
+                self.fig4 = Figure(figsize=(5,3.2), dpi=100); self.ax4 = self.fig4.add_subplot(111)
+                self.canvas4 = FigureCanvasTkAgg(self.fig4, master=tab_vol)
+                self.canvas4.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+                self._vol_tsla_line = None
+                self._vol_nvda_line = None
+                self._vol_other_line = None
+            except Exception:
+                logger.exception("fig4 init failed")
+
 
         # Marcar UI como lista y hacer primer render
         self._ui_ready = True
@@ -485,26 +579,34 @@ class TradesApp(tk.Tk):
     def update_table(self):
         try:
             # Clear fast
-            for r in self.tree.get_children():
-                self.tree.delete(r)
-    
+            children = self.tree.get_children()
+            if children:
+                self.tree.delete(*children)
+
             # thresholds once
             hl_qty = safe_float(self.hl_qty.get(), default=float("inf"))
             hl_pnl = safe_float(self.hl_pnl.get(), default=float("inf"))
-    
+
             dfv = self.df_filtered  # shorthand
+
+            # ---- CASO SIN DATOS ----
             if dfv.empty:
-                # also reset KPIs quickly
+                # KPIs PnL
                 self.kpi_total.config(text="PnL Total: 0 (0)")
                 self.kpi_pos.config(text="PnL +: +0 (0)")
                 self.kpi_neg.config(text="PnL -: 0 (0)")
+
+                # KPIs volumen/trades/parchen
+                self.kpi_total_trades.config(text="Total Trades: 0")
+                self.kpi_total_volume.config(text="Total Volume: 0")
+                self.kpi_parchen_trades.config(text="Parchen Trades: 0")
+                self.kpi_parchen_volume.config(text="Parchen Volume: 0")
                 return
-    
-            # Prebuild values row tuples in Python once (fast path)
+
+            # ---------- TABLA PRINCIPAL ----------
             cols = self.DISPLAY_COLS
-            values_rows = dfv[cols].astype(object).values.tolist()  # no per-cell getattr in the loop
-    
-            # Insert rows with a single pass (tags computed once per row)
+            values_rows = dfv[cols].astype(object).values.tolist()
+
             for i, row_vals in enumerate(values_rows):
                 try:
                     qty_v = float(row_vals[cols.index("qty")]) if "qty" in cols else 0.0
@@ -514,15 +616,14 @@ class TradesApp(tk.Tk):
                     cond_hl = False
                 tags = ("HL",) if cond_hl else (("ROW_EVEN",) if i % 2 == 0 else ("ROW_ODD",))
                 self.tree.insert("", "end", values=row_vals, tags=tags)
-    
-            # Column widths: set a sane default (no O(N) scanning every tick)
+
             for col in cols:
                 try:
                     self.tree.column(col, width=max(90, int(9 * max(len(str(col)), 8))), anchor="center")
                 except Exception:
                     pass
-    
-            # KPIs: compute once
+
+            # ---------- KPIs PnL ----------
             if "PnL" in dfv.columns:
                 pnl = dfv["PnL"]
                 total = float(pnl.sum()); n_total = int(len(dfv))
@@ -531,16 +632,37 @@ class TradesApp(tk.Tk):
                 neg_sum = float(pnl.loc[neg_mask].sum()); n_neg = int(neg_mask.sum())
             else:
                 total = pos_sum = neg_sum = 0.0; n_total = n_pos = n_neg = 0
-    
+
             sign = "+" if total > 0 else ("−" if total < 0 else "")
-            # format once here
             self.kpi_total.config(text=f"PnL Total: {sign}{abs(total):,.0f} ({n_total})")
             self.kpi_pos.config(text=f"PnL +: +{pos_sum:,.0f} ({n_pos})")
             self.kpi_neg.config(text=f"PnL -: {neg_sum:,.0f} ({n_neg})")
-    
+
+            # ---------- KPIs TRADES / VOLUMEN / PARCHEN ----------
+            # Todos basados en dfv (filtrado)
+            self.kpi_total_trades.config(text=f"Total Trades: {len(dfv)}")
+
+            if "qty" in dfv.columns:
+                self.kpi_total_volume.config(
+                    text=f"Total Volume: {dfv['qty'].abs().sum():,}"
+                )
+            else:
+                self.kpi_total_volume.config(text="Total Volume: 0")
+
+            # Cuando tengas flag real de parchen, filtras aquí
+            par = dfv  # placeholder
+            self.kpi_parchen_trades.config(text=f"Parchen Trades: {len(par)}")
+            if "qty" in par.columns:
+                self.kpi_parchen_volume.config(
+                    text=f"Parchen Volume: {par['qty'].abs().sum():,}"
+                )
+            else:
+                self.kpi_parchen_volume.config(text="Parchen Volume: 0")
+
         except Exception:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.exception("update_table failed")
+
 
 
     # ---- BIS accessor (para uso futuro en lógica/funciones) ----
@@ -570,8 +692,6 @@ class TradesApp(tk.Tk):
         if not (MATPLOTLIB_OK and self.ax2 and self.canvas2):
             return
         try:
-            import matplotlib.dates as mdates
-            import pandas as pd
     
             # lazy axis init (titles/formatters once)
             if getattr(self, "_ax2_inited", False) is False:
@@ -622,12 +742,12 @@ class TradesApp(tk.Tk):
     
             # 1s grouping via resample
             s = (df.set_index("TimeDT")["PnL"]
-                    .resample("1S", origin="start_day").sum()
+                    .resample("1s", origin="start_day").sum()
                     .sort_index())
     
             # Reindex strictly between first & last second with data
             first_sec, last_sec = s.index[0], s.index[-1]
-            sec_index = pd.date_range(first_sec, last_sec, freq="1S")
+            sec_index = pd.date_range(first_sec, last_sec, freq="1s")
             s = s.reindex(sec_index, fill_value=0.0)
     
             # cumulative series (no clears; reuse the line)
@@ -647,6 +767,143 @@ class TradesApp(tk.Tk):
             if logger.isEnabledFor(logging.DEBUG):
                 logger.exception("update_cumulative_pnl failed")
 
+    def update_volume_over_time(self):
+        if not (MATPLOTLIB_OK and self.ax4 and self.canvas4):
+            return
+        try:
+
+            # lazy axis init
+            if getattr(self, "_ax4_inited", False) is False:
+                self.ax4.set_title("Cumulative Volume over time (1s grouped)")
+                self.ax4.set_xlabel("Time")
+                self.ax4.set_ylabel("Cumulative volume (|qty| * price)")
+                self.ax4.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                self.ax4.xaxis.set_major_locator(mdates.HourLocator(byhour=[8,10,12,14,16,18,20,22]))
+                self.ax4.grid(True, axis="y", alpha=0.2)
+                self._ax4_inited = True
+
+            needed = {"TimeDT", "qty", "exec price", "nombre"}
+            if self.df_filtered.empty or not needed.issubset(self.df_filtered.columns):
+                today = pd.Timestamp.today().normalize()
+                start, end = self._day_window_bounds(today)
+                self.ax4.set_xlim(start, end)
+                if self._vol_tsla_line is None:
+                    (self._vol_tsla_line,) = self.ax4.plot([], [], linewidth=2, label="TSLA")
+                    (self._vol_nvda_line,) = self.ax4.plot([], [], linewidth=2, label="NVDA")
+                    (self._vol_other_line,) = self.ax4.plot([], [], linewidth=2, label="Other")
+                    self.ax4.legend(loc="upper left")
+                else:
+                    self._vol_tsla_line.set_data([], [])
+                    self._vol_nvda_line.set_data([], [])
+                    self._vol_other_line.set_data([], [])
+                self.canvas4.draw_idle()
+                return
+
+            df = self.df_filtered.copy()
+            df["TimeDT"] = pd.to_datetime(df["TimeDT"], errors="coerce")
+            df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+            df["exec price"] = pd.to_numeric(df["exec price"], errors="coerce")
+            df = df.dropna(subset=["TimeDT", "qty", "exec price"])
+            if df.empty:
+                today = pd.Timestamp.today().normalize()
+                start, end = self._day_window_bounds(today)
+                self.ax4.set_xlim(start, end)
+                if self._vol_tsla_line is None:
+                    (self._vol_tsla_line,) = self.ax4.plot([], [], linewidth=2, label="TSLA")
+                    (self._vol_nvda_line,) = self.ax4.plot([], [], linewidth=2, label="NVDA")
+                    (self._vol_other_line,) = self.ax4.plot([], [], linewidth=2, label="Other")
+                    self.ax4.legend(loc="upper left")
+                else:
+                    self._vol_tsla_line.set_data([], [])
+                    self._vol_nvda_line.set_data([], [])
+                    self._vol_other_line.set_data([], [])
+                self.canvas4.draw_idle()
+                return
+
+            # limitar a la ventana 08–22 del día del primer trade
+            start_day, end_day = self._day_window_bounds(df["TimeDT"].iloc[0])
+            df = df[(df["TimeDT"] >= start_day) & (df["TimeDT"] <= end_day)]
+            if df.empty:
+                self.ax4.set_xlim(start_day, end_day)
+                if self._vol_tsla_line is None:
+                    (self._vol_tsla_line,) = self.ax4.plot([], [], linewidth=2, label="TSLA")
+                    (self._vol_nvda_line,) = self.ax4.plot([], [], linewidth=2, label="NVDA")
+                    (self._vol_other_line,) = self.ax4.plot([], [], linewidth=2, label="Other")
+                    self.ax4.legend(loc="upper left")
+                else:
+                    self._vol_tsla_line.set_data([], [])
+                    self._vol_nvda_line.set_data([], [])
+                    self._vol_other_line.set_data([], [])
+                self.canvas4.draw_idle()
+                return
+
+            # volumen = |qty| * price
+            df["vol"] = df["exec price"].abs() * df["qty"].abs()
+
+            # bucket: TSLA, NVDA, Other (por nombre)
+            names = df["nombre"].astype(str).str.upper()
+            df["bucket"] = "Other"
+            df.loc[names == "TSLA", "bucket"] = "TSLA"
+            df.loc[names == "NVDA", "bucket"] = "NVDA"
+
+            # resample 1s por bucket (volumen por segundo)
+            s = (df.set_index("TimeDT")
+                    .groupby("bucket")["vol"]
+                    .resample("1s", origin="start_day")
+                    .sum()
+                    .unstack("bucket")
+                    .sort_index())
+
+            # asegurar columnas TSLA, NVDA, Other
+            for col in ["TSLA", "NVDA", "Other"]:
+                if col not in s.columns:
+                    s[col] = 0.0
+            s = s[["TSLA", "NVDA", "Other"]]
+
+            # reindex continuo y rellenar
+            first_sec, last_sec = s.index[0], s.index[-1]
+            idx = pd.date_range(first_sec, last_sec, freq="1s")
+            s = s.reindex(idx, fill_value=0.0)
+
+            # 🔹 HACERLO ACUMULADO
+            s_cum = s.cumsum()
+
+            if self._vol_tsla_line is None:
+                (self._vol_tsla_line,) = self.ax4.plot(
+                    s_cum.index, s_cum["TSLA"].values,
+                    linewidth=2, drawstyle="steps-post", label="TSLA"
+                )
+                (self._vol_nvda_line,) = self.ax4.plot(
+                    s_cum.index, s_cum["NVDA"].values,
+                    linewidth=2, drawstyle="steps-post", label="NVDA"
+                )
+                (self._vol_other_line,) = self.ax4.plot(
+                    s_cum.index, s_cum["Other"].values,
+                    linewidth=2, drawstyle="steps-post", label="Other"
+                )
+                self.ax4.legend(loc="upper left")
+            else:
+                self._vol_tsla_line.set_data(s_cum.index, s_cum["TSLA"].values)
+                self._vol_nvda_line.set_data(s_cum.index, s_cum["NVDA"].values)
+                self._vol_other_line.set_data(s_cum.index, s_cum["Other"].values)
+
+            self.ax4.set_xlim(start_day, end_day)
+            from matplotlib.ticker import FuncFormatter
+            def _fmt_vol(y, pos):
+                if abs(y) >= 1_000_000:
+                    return f"{y/1_000_000:.1f}M"
+                return f"{y:,.0f}"
+            
+            
+            self.ax4.yaxis.set_major_formatter(FuncFormatter(_fmt_vol))
+            self.fig4.tight_layout()
+            self.canvas4.draw_idle()
+
+        except Exception:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.exception("update_volume_over_time failed")
+
+
 
 
     def _day_window_bounds(self, ts: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -660,8 +917,6 @@ class TradesApp(tk.Tk):
         if not (MATPLOTLIB_OK and self.ax3 and self.canvas3):
             return
         try:
-            import matplotlib.dates as mdates
-            import pandas as pd
     
             # lazy axis init once
             if getattr(self, "_ax3_inited", False) is False:
@@ -707,11 +962,11 @@ class TradesApp(tk.Tk):
                 return
     
             # 1s counts, then cumulative
-            counts = (df.set_index(df["TimeDT"].dt.floor("S"))
+            counts = (df.set_index(df["TimeDT"].dt.floor("s"))
                         .sort_index()
                         .groupby(level=0)["TimeDT"].size())
             first_sec, last_sec = counts.index[0], counts.index[-1]
-            sec_index = pd.date_range(first_sec, last_sec, freq="1S")
+            sec_index = pd.date_range(first_sec, last_sec, freq="1s")
             counts = counts.reindex(sec_index, fill_value=0)
             cum = counts.cumsum()
     
@@ -788,6 +1043,20 @@ class TradesApp(tk.Tk):
             self.exch_table.set_rows(rows_from_df(g_ex, "Exchange"))
             self.isin_table.set_rows(rows_from_df(g_isin, "ISIN"))
             self.nombre_table.set_rows(rows_from_df(g_nom, "nombre"))
+            self.cp_table.update_from_df(self.df_all)
+            
+            #self.cp_table = CounterpartyVolumeTable(
+            #    tab_cp,
+            #    columns=cp_cols,
+            #    bucket_col="UND_TYPE",                 # <--- aquí
+            #    main_values=("KO_CALL", "KO_PUT"),     # <--- y aquí
+            #    col_weights=cp_weights,
+            #    min_col_widths=cp_min,
+            #    bg="white",
+            #)
+
+           
+            
         except Exception:
             logger.exception("update_global_summaries failed")
 
@@ -809,8 +1078,11 @@ class TradesApp(tk.Tk):
             logger.exception("sort_main_by failed for %s", col)
 
     def update_all_views(self):
-        self.update_table(); self.update_cumulative_pnl(); self.update_trades_over_time()
-
+        self.update_table(); 
+        self.update_cumulative_pnl(); 
+        self.update_trades_over_time()
+        self.update_volume_over_time()
+        
 
     def refresh_data(self):
         try:
@@ -879,5 +1151,8 @@ class TradesApp(tk.Tk):
                     logger.exception("CSV export failed"); messagebox.showerror("Export CSV", f"Error:\n{e}")
         except Exception:
             logger.exception("export_csv outer failed")
+        
+
+    
 
 

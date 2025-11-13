@@ -343,3 +343,130 @@ class SummaryTable(ttk.Frame):
 
         except Exception:
             logger.exception("SummaryTable render failed")
+
+class CounterpartyVolumeTable(SummaryTable):
+    """
+    Tabla especializada para volumen y market share por counterparty.
+    Paramétrica en:
+      - bucket_col: columna que define el tipo (p.ej. 'nombre' o 'UND_TYPE')
+      - main_values: tuplas con los 2 tipos principales (p.ej. ('TSLA','NVDA') o ('KO_CALL','KO_PUT'))
+    """
+
+    def __init__(
+        self,
+        master,
+        columns: List[str],
+        bucket_col: str,
+        main_values: Tuple[str, str],
+        col_weights: Optional[Dict[str, float]] = None,
+        min_col_widths: Optional[Dict[str, int]] = None,
+        row_height: int = 28,
+        header_height: int = 30,
+        bg: str = "white",
+        **kwargs
+    ):
+        super().__init__(
+            master,
+            columns=columns,
+            col_weights=col_weights,
+            min_col_widths=min_col_widths,
+            row_height=row_height,
+            header_height=header_height,
+            bg=bg,
+            **kwargs,
+        )
+        self.bucket_col = bucket_col
+        # guardamos también versiones upper para el match
+        self.main_values = tuple(main_values)
+        self.main_values_upper = tuple(v.upper() for v in main_values)
+
+    def update_from_df(self, df):
+        try:
+            needed = {"counterparty", self.bucket_col, "qty", "exec price"}
+            if df is None or df.empty or not needed.issubset(df.columns):
+                self.set_rows([])
+                return
+
+            import pandas as pd
+
+            df = df.copy()
+            df["qty"] = pd.to_numeric(df["qty"], errors="coerce").abs()
+            df["exec price"] = pd.to_numeric(df["exec price"], errors="coerce").abs()
+            df = df.dropna(subset=["qty", "exec price"])
+            if df.empty:
+                self.set_rows([])
+                return
+
+            # volumen en dinero
+            df["vol"] = df["qty"] * df["exec price"]
+
+            # buckets a partir de bucket_col
+            vals_upper = df[self.bucket_col].astype(str).str.upper()
+            main1, main2 = self.main_values
+            main1_u, main2_u = self.main_values_upper
+
+            df["bucket"] = "Other"
+            df.loc[vals_upper == main1_u, "bucket"] = main1
+            df.loc[vals_upper == main2_u, "bucket"] = main2
+
+            # agrupar
+            g = (
+                df.groupby(["counterparty", "bucket"])["vol"]
+                  .sum()
+                  .unstack("bucket", fill_value=0.0)
+            )
+
+            # asegurar columnas
+            for c in [main1, main2, "Other"]:
+                if c not in g.columns:
+                    g[c] = 0.0
+
+            g["total"] = g[main1] + g[main2] + g["Other"]
+
+            # total global (para Marktanteil Total)
+            total_global = g["total"].sum() if g["total"].sum() > 0 else 1.0
+
+            # ordenar por volumen total
+            g = g.sort_values("total", ascending=False)
+
+            def fmt_vol(x: float) -> str:
+                return f"{x:,.0f}"
+
+            def fmt_pct(x: float) -> str:
+                return f"{x*100:.1f}%"
+
+            rows: List[List[Any]] = []
+            for cp, r in g.iterrows():
+                tot = float(r["total"])
+                if tot <= 0:
+                    continue
+
+                vol1 = float(r[main1])
+                vol2 = float(r[main2])
+                vol_other = float(r["Other"])
+
+                pct1 = vol1 / tot
+                pct2 = vol2 / tot
+                pct_other = vol_other / tot
+
+                pct_total = tot / total_global  # share de ese CP vs total global
+
+                # Orden de columnas:
+                # [Counterparty,
+                #  Vol main1, Marktanteil main1,
+                #  Vol main2, Marktanteil main2,
+                #  Vol Other, Marktanteil Other,
+                #  Marktanteil Total]
+                rows.append([
+                    cp,
+                    fmt_vol(vol1),    fmt_pct(pct1),
+                    fmt_vol(vol2),    fmt_pct(pct2),
+                    fmt_vol(vol_other), fmt_pct(pct_other),
+                    fmt_pct(pct_total),
+                ])
+
+            self.set_rows(rows)
+
+        except Exception:
+            logger.exception("CounterpartyVolumeTable.update_from_df failed")
+            self.set_rows([])

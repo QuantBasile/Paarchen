@@ -478,30 +478,101 @@ class TradesApp(tk.Tk):
                 ttk.Label(colf, text=str(col), font=("Segoe UI Semibold",10)).pack(anchor="w")
 
                 if not is_numeric_dtype(df[col]):
+                    # --- CATEGÓRICO (con barra de búsqueda solo para ISIN) ---
                     values = sorted(map(str, pd.unique(df[col].astype(str))))
                     values = ["(All)"] + values
-                    lb = tk.Listbox(colf,
-                                    height=min(6, max(1, len(values))),
-                                    exportselection=False,
-                                    selectmode="extended")
+        
+                    # Opcional: barra de búsqueda solo para ISIN
+                    search_var = None
+                    if col == "ISIN":
+                        search_var = tk.StringVar()
+                        search_entry = ttk.Entry(colf, textvariable=search_var)
+                        # Barra pegada al título de la columna
+                        search_entry.pack(anchor="w", fill="x", pady=(2,0))
+        
+                    lb = tk.Listbox(
+                        colf,
+                        height=min(6, max(1, len(values))),
+                        exportselection=False,
+                        selectmode="extended",
+                    )
+                    lb.pack(anchor="w", fill="x", pady=(2,0))
+        
+                    # Valores iniciales completos
                     for v in values:
                         lb.insert(tk.END, v)
-                    lb.pack(anchor="w", fill="x", pady=(2,0))
+        
                     # Restaurar selección previa (lista) o "(All)"
                     to_select_list = prev.get(col, ["(All)"])
-                    try_indices = [values.index(v) for v in to_select_list if v in values]
-                    if not try_indices:
+                    current_vals = [lb.get(i) for i in range(lb.size())]
+                    try_indices = [current_vals.index(v) for v in to_select_list if v in current_vals]
+                    if not try_indices and current_vals:
                         try_indices = [0]
                     lb.selection_clear(0, tk.END)
                     for i in try_indices:
                         lb.selection_set(i)
-                    # Debounce en selección
-                    lb.bind("<<ListboxSelect>>", lambda e: self._debouncer.schedule(
-                        "filters", self._filter_debounce_ms, self.apply_dynamic_filters
-                    ))
-                    self.dynamic_filters[col] = {"type":"cat","listbox":lb,"values":values}
-                 
+        
+                    # Debounce en selección (como antes)
+                    lb.bind(
+                        "<<ListboxSelect>>",
+                        lambda e: self._debouncer.schedule(
+                            "filters", self._filter_debounce_ms, self.apply_dynamic_filters
+                        ),
+                    )
+        
+                    # Meta básica del filtro categórico
+                    meta = {
+                        "type": "cat",
+                        "listbox": lb,
+                        "values": current_vals,  # lo que hay ahora mismo en el listbox
+                    }
+        
+                    # --- LÓGICA DE BÚSQUEDA SOLO PARA ISIN ---
+                    if col == "ISIN":
+                        # Lista base sin "(All)" para filtrar
+                        all_isins = [v for v in values if v != "(All)"]
+        
+                        def _apply_isin_search(
+                            event=None,
+                            all_isins=all_isins,
+                            lb=lb,
+                            search_var=search_var,
+                        ):
+                            text = (search_var.get() or "").strip().lower()
+                            if text:
+                                filtered = [v for v in all_isins if text in v.lower()]
+                            else:
+                                filtered = list(all_isins)
+        
+                            display_vals = ["(All)"] + filtered
+        
+                            lb.delete(0, tk.END)
+                            for val in display_vals:
+                                lb.insert(tk.END, val)
+        
+                            # Por defecto seleccionamos "(All)"
+                            lb.selection_clear(0, tk.END)
+                            if display_vals:
+                                lb.selection_set(0)
+        
+                            # Reaplicar filtros con debounce
+                            self._debouncer.schedule(
+                                "filters",
+                                self._filter_debounce_ms,
+                                self.apply_dynamic_filters,
+                            )
+        
+                        # Cada tecla en el buscador actualiza el listbox de ISIN
+                        search_entry.bind("<KeyRelease>", _apply_isin_search)
+        
+                        # Por si quieres tener acceso futuro al estado del buscador
+                        meta["search_var"] = search_var
+                        meta["all_values"] = all_isins
+        
+                    self.dynamic_filters[col] = meta
+        
                 else:
+                    # --- NUMÉRICO (igual que antes) ---
                     min_var = tk.StringVar(value=""); max_var = tk.StringVar(value="")
                     row1 = ttk.Frame(colf, style="Card.TFrame"); row1.pack(anchor="w", pady=(2,0))
                     ttk.Label(row1, text="min").pack(side=tk.LEFT)
@@ -526,6 +597,9 @@ class TradesApp(tk.Tk):
                         "filters", self._filter_debounce_ms, self.apply_dynamic_filters
                     ))
                     
+                    
+                    self.dynamic_filters[col] = {"type":"num","min_var":min_var,"max_var":max_var}
+
                     
                     
                     self.dynamic_filters[col] = {"type":"num","min_var":min_var,"max_var":max_var}

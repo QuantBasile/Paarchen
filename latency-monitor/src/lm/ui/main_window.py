@@ -458,12 +458,21 @@ class TradesApp(tk.Tk):
         for col, meta in self.dynamic_filters.items():
             try:
                 if meta["type"] == "cat":
-                    sel = meta["listbox"].curselection()
-                    prev[col] = [meta["listbox"].get(i) for i in sel] if sel else ["(All)"]
+                    lbs = meta["listbox"]
+                    if not isinstance(lbs, (list, tuple)):
+                        lbs = [lbs]
+        
+                    chosen = []
+                    for lb in lbs:
+                        sel = lb.curselection()
+                        chosen.extend(lb.get(i) for i in sel)
+        
+                    prev[col] = chosen if chosen else ["(All)"]
                 else:
                     prev[col] = (meta["min_var"].get(), meta["max_var"].get())
             except Exception:
                 prev[col] = None
+
 
         for w in self.filters_frame.winfo_children(): w.destroy()
         self.dynamic_filters.clear()
@@ -478,99 +487,114 @@ class TradesApp(tk.Tk):
                 ttk.Label(colf, text=str(col), font=("Segoe UI Semibold",10)).pack(anchor="w")
 
                 if not is_numeric_dtype(df[col]):
-                    # --- CATEGÓRICO (con barra de búsqueda solo para ISIN) ---
                     values = sorted(map(str, pd.unique(df[col].astype(str))))
                     values = ["(All)"] + values
         
-                    # Opcional: barra de búsqueda solo para ISIN
-                    search_var = None
-                    if col == "ISIN":
-                        search_var = tk.StringVar()
-                        search_entry = ttk.Entry(colf, textvariable=search_var)
-                        # Barra pegada al título de la columna
-                        search_entry.pack(anchor="w", fill="x", pady=(2,0))
-        
-                    lb = tk.Listbox(
-                        colf,
-                        height=min(6, max(1, len(values))),
-                        exportselection=False,
-                        selectmode="extended",
-                    )
-                    lb.pack(anchor="w", fill="x", pady=(2,0))
-        
-                    # Valores iniciales completos
-                    for v in values:
-                        lb.insert(tk.END, v)
-        
-                    # Restaurar selección previa (lista) o "(All)"
-                    to_select_list = prev.get(col, ["(All)"])
-                    current_vals = [lb.get(i) for i in range(lb.size())]
-                    try_indices = [current_vals.index(v) for v in to_select_list if v in current_vals]
-                    if not try_indices and current_vals:
-                        try_indices = [0]
-                    lb.selection_clear(0, tk.END)
-                    for i in try_indices:
-                        lb.selection_set(i)
-        
-                    # Debounce en selección (como antes)
-                    lb.bind(
-                        "<<ListboxSelect>>",
-                        lambda e: self._debouncer.schedule(
-                            "filters", self._filter_debounce_ms, self.apply_dynamic_filters
-                        ),
-                    )
-        
-                    # Meta básica del filtro categórico
-                    meta = {
-                        "type": "cat",
-                        "listbox": lb,
-                        "values": current_vals,  # lo que hay ahora mismo en el listbox
-                    }
-        
-                    # --- LÓGICA DE BÚSQUEDA SOLO PARA ISIN ---
-                    if col == "ISIN":
-                        # Lista base sin "(All)" para filtrar
-                        all_isins = [v for v in values if v != "(All)"]
-        
-                        def _apply_isin_search(
-                            event=None,
-                            all_isins=all_isins,
-                            lb=lb,
-                            search_var=search_var,
-                        ):
-                            text = (search_var.get() or "").strip().lower()
-                            if text:
-                                filtered = [v for v in all_isins if text in v.lower()]
+                    # --- CASO ESPECIAL: COUNTERPARTY EN DOS COLUMNAS ---
+                    if col == "counterparty":
+                    
+                        # Valores sin "(All)"
+                        base_vals = values[1:]
+                        n = len(base_vals)
+                        chunk = math.ceil(n / 3) if n > 0 else 0
+                    
+                        # Dividimos en 3 columnas (listas)
+                        col_vals = [base_vals[i:i+chunk] for i in range(0, n, chunk)]
+                        # Aseguramos exactamente 3 listas
+                        while len(col_vals) < 3:
+                            col_vals.append([])
+                    
+                        # Frame para poner los tres listbox en horizontal
+                        lb_frame = ttk.Frame(colf, style="Card.TFrame")
+                        lb_frame.pack(anchor="w", fill="both", expand=True, pady=(2,0))
+                    
+                        lbs = []
+                        displays = []
+                    
+                        for idx, vals_col in enumerate(col_vals):
+                            # Primer listbox: con "(All)" arriba
+                            if idx == 0:
+                                display_vals = ["(All)"] + vals_col
                             else:
-                                filtered = list(all_isins)
-        
-                            display_vals = ["(All)"] + filtered
-        
-                            lb.delete(0, tk.END)
-                            for val in display_vals:
-                                lb.insert(tk.END, val)
-        
-                            # Por defecto seleccionamos "(All)"
-                            lb.selection_clear(0, tk.END)
-                            if display_vals:
-                                lb.selection_set(0)
-        
-                            # Reaplicar filtros con debounce
-                            self._debouncer.schedule(
-                                "filters",
-                                self._filter_debounce_ms,
-                                self.apply_dynamic_filters,
+                                display_vals = list(vals_col)
+                    
+                            lb = tk.Listbox(
+                                lb_frame,
+                                height=min(10, max(4, len(display_vals))),
+                                exportselection=False,
+                                selectmode="extended",
                             )
+                            # padding lateral para que respiren
+                            padx = (0, 3) if idx == 0 else (3, 0) if idx == 2 else (3, 3)
+                            lb.pack(side=tk.LEFT, fill="both", expand=True, padx=padx)
+                    
+                            for v in display_vals:
+                                lb.insert(tk.END, v)
+                    
+                            lbs.append(lb)
+                            displays.append(display_vals)
+                    
+                        # Restaurar selección previa
+                        to_select_list = prev.get(col, ["(All)"]) or ["(All)"]
+                    
+                        for lb, disp_vals in zip(lbs, displays):
+                            lb.selection_clear(0, tk.END)
+                            for choice in to_select_list:
+                                if choice in disp_vals:
+                                    idx = disp_vals.index(choice)
+                                    lb.selection_set(idx)
+                    
+                        # Debounce en selección para todos los listbox
+                        for lb in lbs:
+                            lb.bind(
+                                "<<ListboxSelect>>",
+                                lambda e: self._debouncer.schedule(
+                                    "filters", self._filter_debounce_ms, self.apply_dynamic_filters
+                                ),
+                            )
+                    
+                        # Guardamos la lista de listbox en meta
+                        self.dynamic_filters[col] = {
+                            "type": "cat",
+                            "listbox": lbs,   # <-- ahora son 3
+                            "values": values,
+                        }
+
         
-                        # Cada tecla en el buscador actualiza el listbox de ISIN
-                        search_entry.bind("<KeyRelease>", _apply_isin_search)
+                    # --- RESTO DE CATEGÓRICAS: IGUAL QUE ANTES ---
+                    else:
+                        lb = tk.Listbox(
+                            colf,
+                            height=min(6, max(1, len(values))),
+                            exportselection=False,
+                            selectmode="extended",
+                        )
+                        for v in values:
+                            lb.insert(tk.END, v)
+                        lb.pack(anchor="w", fill="x", pady=(2,0))
         
-                        # Por si quieres tener acceso futuro al estado del buscador
-                        meta["search_var"] = search_var
-                        meta["all_values"] = all_isins
+                        # Restaurar selección previa (lista) o "(All)"
+                        to_select_list = prev.get(col, ["(All)"])
+                        try_indices = [values.index(v) for v in to_select_list if v in values]
+                        if not try_indices:
+                            try_indices = [0]
+                        lb.selection_clear(0, tk.END)
+                        for i in try_indices:
+                            lb.selection_set(i)
         
-                    self.dynamic_filters[col] = meta
-        
+                        # Debounce en selección
+                        lb.bind(
+                            "<<ListboxSelect>>",
+                            lambda e: self._debouncer.schedule(
+                                "filters", self._filter_debounce_ms, self.apply_dynamic_filters
+                            ),
+                        )
+                        self.dynamic_filters[col] = {
+                            "type": "cat",
+                            "listbox": lb,
+                            "values": values,
+                        }
+       
                 else:
                     # --- NUMÉRICO (igual que antes) ---
                     min_var = tk.StringVar(value=""); max_var = tk.StringVar(value="")
@@ -615,10 +639,17 @@ class TradesApp(tk.Tk):
             df = self.df_all.copy()
             for col, meta in self.dynamic_filters.items():
                 if meta["type"] == "cat":
-                    sel_idx = meta["listbox"].curselection()
-                    if sel_idx:
-                        chosen = [meta["listbox"].get(i) for i in sel_idx]
-                        # Si "(All)" está seleccionado o la selección queda vacía: no filtra
+                    lbs = meta["listbox"]
+                    if not isinstance(lbs, (list, tuple)):
+                        lbs = [lbs]
+    
+                    chosen = []
+                    for lb in lbs:
+                        sel_idx = lb.curselection()
+                        chosen.extend(lb.get(i) for i in sel_idx)
+    
+                    if chosen:
+                        # Si "(All)" está seleccionado → no filtramos
                         chosen_wo_all = [v for v in chosen if v != "(All)"]
                         if chosen_wo_all:
                             df = df[df[col].astype(str).isin(chosen_wo_all)]
@@ -647,6 +678,7 @@ class TradesApp(tk.Tk):
                     meta["min_var"].set(""); meta["max_var"].set("")
             self.df_filtered = self.df_all.copy()
             self.update_all_views()
+
         except Exception:
             logger.exception("clear filters failed")
 

@@ -114,6 +114,8 @@ class TradesApp(tk.Tk):
         self.refresh_ms = tk.IntVar(value=int(refresh_ms))
         self.running = tk.BooleanVar(value=True)
         self.sort_state_main: Dict[str, bool] = {}
+        self._simple_mode = False  # modo "solo Cumulative PnL"
+
         # Debounce config
         self._debouncer = Debouncer(self)
         self._filter_debounce_ms = 200  # ajusta en settings si quieres
@@ -141,6 +143,14 @@ class TradesApp(tk.Tk):
         self.refresh_entry = ttk.Entry(ctrl_card, width=8, textvariable=self.refresh_ms); self.refresh_entry.pack(side=tk.LEFT, padx=(0,10))
         self.btn_freeze = ttk.Button(ctrl_card, text="⏸ Freeze", command=self.toggle_run); self.btn_freeze.pack(side=tk.LEFT, padx=4)
 
+        self.btn_simple = ttk.Button(
+            ctrl_card,
+            text="Vista PnL simple",
+            command=self.toggle_simple_view,
+        )
+        self.btn_simple.pack(side=tk.LEFT, padx=4)
+
+
 
         # NEW: BIS control
         ttk.Label(ctrl_card, text="BIS:").pack(side=tk.LEFT, padx=(16,6))
@@ -153,31 +163,37 @@ class TradesApp(tk.Tk):
         ttk.Button(ctrl_card, text="Clear All Filters", command=self.clear_all_dynamic_filters).pack(side=tk.RIGHT, padx=6)
 
         # Highlight
-        hl_card = ttk.Frame(self.left_frame, style="Card.TFrame"); hl_card.pack(fill=tk.X, padx=4, pady=(0,8))
-        ttk.Label(hl_card, text="Highlight if:  qty >", font=("Segoe UI",10,"bold")).pack(side=tk.LEFT, padx=(10,4))
-        e_hl_qty = ttk.Entry(hl_card, width=8, textvariable=self.hl_qty)
+        self.hl_card = ttk.Frame(self.left_frame, style="Card.TFrame")
+        self.hl_card.pack(fill=tk.X, padx=4, pady=(0,8))
+        ttk.Label(self.hl_card, text="Highlight if:  qty >", font=("Segoe UI",10,"bold")).pack(side=tk.LEFT, padx=(10,4))
+        e_hl_qty = ttk.Entry(self.hl_card, width=8, textvariable=self.hl_qty)
+
         e_hl_qty.pack(side=tk.LEFT, padx=(0,12)); e_hl_qty.bind("<Return>", lambda e: self.update_all_views()); e_hl_qty.bind("<FocusOut>", lambda e: self.update_all_views())
-        ttk.Label(hl_card, text="AND   PnL >", font=("Segoe UI",10,"bold")).pack(side=tk.LEFT, padx=(6,4))
-        e_hl_pnl = ttk.Entry(hl_card, width=8, textvariable=self.hl_pnl)
+        ttk.Label(self.hl_card, text="AND   PnL >", font=("Segoe UI",10,"bold")).pack(side=tk.LEFT, padx=(6,4))
+        e_hl_pnl = ttk.Entry(self.hl_card, width=8, textvariable=self.hl_pnl)
         e_hl_pnl.pack(side=tk.LEFT, padx=(0,12)); e_hl_pnl.bind("<Return>", lambda e: self.update_all_views()); e_hl_pnl.bind("<FocusOut>", lambda e: self.update_all_views())
-        ttk.Label(hl_card, text="(Only rows meeting both are highlighted)", foreground="#666").pack(side=tk.LEFT, padx=(8,0))
+        ttk.Label(self.hl_card, text="(Only rows meeting both are highlighted)", foreground="#666").pack(side=tk.LEFT, padx=(8,0))
 
         # --- Popup toggle (simple) ---
         self.popups_enabled = getattr(self, "popups_enabled", None) or tk.BooleanVar(value=True)
-        ttk.Checkbutton(hl_card, text="Popup", variable=self.popups_enabled).pack(side=tk.LEFT, padx=(10,6))
+        ttk.Checkbutton(self.hl_card, text="Popup", variable=self.popups_enabled).pack(side=tk.LEFT, padx=(10,6))
 
 
 
         # Dynamic filters
-        filters_card = ttk.Frame(self.left_frame, style="Card.TFrame"); filters_card.pack(fill=tk.X, padx=4, pady=(0,8))
-        self.filters_frame = ttk.Frame(filters_card, style="Card.TFrame"); self.filters_frame.pack(fill=tk.X, padx=8, pady=8)
+        self.filters_card = ttk.Frame(self.left_frame, style="Card.TFrame")
+        self.filters_card.pack(fill=tk.X, padx=4, pady=(0,8))
+        self.filters_frame = ttk.Frame(self.filters_card, style="Card.TFrame")
+        self.filters_frame.pack(fill=tk.X, padx=8, pady=8)
+
         self.dynamic_filters: Dict[str, Dict[str, Any]] = {}
         self.skip_filter_cols = {"Time", "TimeDT"}
         self.build_dynamic_filters(self.df_all)
 
-        # Main table
-        table_card = ttk.Frame(self.left_frame, style="Card.TFrame"); table_card.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0,8))
-        self.tree = ttk.Treeview(table_card, columns=self.DISPLAY_COLS, show="headings")
+       # Main table
+        self.table_card = ttk.Frame(self.left_frame, style="Card.TFrame")
+        self.table_card.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0,8))
+        self.tree = ttk.Treeview(self.table_card, columns=self.DISPLAY_COLS, show="headings")
         self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         for col in self.DISPLAY_COLS:
             self.tree.heading(col, text=col, command=lambda c=col: self.sort_main_by(c))
@@ -190,13 +206,13 @@ class TradesApp(tk.Tk):
         
 
         # KPIs
-        kpi_card = ttk.Frame(self.left_frame, style="Root.TFrame"); kpi_card.pack(fill=tk.X, padx=4, pady=(0,6))
+        self.kpi_card = ttk.Frame(self.left_frame, style="Root.TFrame"); self.kpi_card.pack(fill=tk.X, padx=4, pady=(0,6))
         
         # Contenedores dentro del KPI CARD
-        self.kpi_left_box = ttk.Frame(kpi_card, style="Root.TFrame")
+        self.kpi_left_box = ttk.Frame(self.kpi_card, style="Root.TFrame")
         self.kpi_left_box.pack(side=tk.LEFT, padx=8)
         
-        self.kpi_right_box = ttk.Frame(kpi_card, style="Root.TFrame")
+        self.kpi_right_box = ttk.Frame(self.kpi_card, style="Root.TFrame")
         self.kpi_right_box.pack(side=tk.RIGHT, padx=8)
 
         #contenedor izquierda
@@ -225,11 +241,11 @@ class TradesApp(tk.Tk):
         self.kpi_parchen_volume.pack(side=tk.LEFT, padx=(10,20))
 
         #contenedor derecha        
-        self.kpi_total = tk.Label(kpi_card, text="", font=("Segoe UI Semibold",11),
+        self.kpi_total = tk.Label(self.kpi_card, text="", font=("Segoe UI Semibold",11),
                                   bg=self.PALETTE["kpi_neu"], fg=self.PALETTE["kpi_neu_txt"], padx=12, pady=6)
-        self.kpi_pos = tk.Label(kpi_card, text="", font=("Segoe UI",11),
+        self.kpi_pos = tk.Label(self.kpi_card, text="", font=("Segoe UI",11),
                                 bg=self.PALETTE["kpi_pos"], fg=self.PALETTE["kpi_pos_txt"], padx=12, pady=6)
-        self.kpi_neg = tk.Label(kpi_card, text="", font=("Segoe UI",11),
+        self.kpi_neg = tk.Label(self.kpi_card, text="", font=("Segoe UI",11),
                                 bg=self.PALETTE["kpi_neg"], fg=self.PALETTE["kpi_neg_txt"], padx=12, pady=6)
         self.kpi_neg.pack(side=tk.RIGHT, padx=(8,10)); self.kpi_pos.pack(side=tk.RIGHT, padx=8); self.kpi_total.pack(side=tk.RIGHT, padx=8)
 
@@ -241,14 +257,20 @@ class TradesApp(tk.Tk):
 
         # ----------- Bottom summaries (UNFILTERED) -----------
         # ----------- Área inferior dividida: [Summary (2/3) | Charts (1/3)] -----------
-        bottom_split = ttk.Panedwindow(self, orient=tk.HORIZONTAL); bottom_split.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0,12))
-        left_summary = ttk.Frame(bottom_split, style="Root.TFrame")
-        right_charts = ttk.Frame(bottom_split, style="Root.TFrame")
-        bottom_split.add(left_summary, weight=2)   # 2/3
-        bottom_split.add(right_charts, weight=1)   # 1/3
+        self.bottom_split = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        self.bottom_split.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0,12))
+        
+        self.left_summary = ttk.Frame(self.bottom_split, style="Root.TFrame")
+        self.right_charts = ttk.Frame(self.bottom_split, style="Root.TFrame")
+        self.bottom_split.add(self.left_summary, weight=2)   # 2/3
+        self.bottom_split.add(self.right_charts, weight=1)   # 1/3
+
+
 
         # Summary tables a la izquierda (Notebook)
-        bottom_area = ttk.Notebook(left_summary); bottom_area.pack(fill=tk.BOTH, expand=True, padx=0, pady=0, ipady=4)
+        bottom_area = ttk.Notebook(self.left_summary)
+        bottom_area.pack(fill=tk.BOTH, expand=True, padx=0, pady=0, ipady=4)
+
         
         self.summary_cols = ["Key","Trades","% Trades PnL+","Δt medio (s)","PnL medio","PnL"]
         col_weights = {"Key":2.2,"Trades":1.7,"% Trades PnL+":1.2,"Δt medio (s)":1.2,"PnL medio":1.2,"PnL":2.0}
@@ -307,57 +329,55 @@ class TradesApp(tk.Tk):
         
         
         # Charts a la derecha (Notebook)
-        charts_nb = ttk.Notebook(right_charts); charts_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.charts_nb = ttk.Notebook(self.right_charts)
+        self.charts_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
+        
         # Cumulative PnL (abajo-derecha)
-        tab_cum = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_cum, text="Cumulative PnL (time)")
+        self.tab_cum = ttk.Frame(self.charts_nb, style="Card.TFrame")
+        self.charts_nb.add(self.tab_cum, text="Cumulative PnL (time)")
         self.fig2 = self.ax2 = self.canvas2 = None
         if MATPLOTLIB_OK:
             try:
-                self.fig2 = Figure(figsize=(5,3.2), dpi=100); self.ax2 = self.fig2.add_subplot(111)
-                self.canvas2 = FigureCanvasTkAgg(self.fig2, master=tab_cum)
-                
-                # Toolbar — debe ir dentro de la pestaña tab_cum
-                self.toolbar2 = NavigationToolbar2Tk(self.canvas2, tab_cum)
+                self.fig2 = Figure(figsize=(5,3.2), dpi=100)
+                self.ax2 = self.fig2.add_subplot(111)
+                self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self.tab_cum)
+        
+                # Toolbar de zoom/pan (ya la tenías, solo cambiamos el parent)
+                self.toolbar2 = NavigationToolbar2Tk(self.canvas2, self.tab_cum)
                 self.toolbar2.update()
                 self.toolbar2.pack(side="top", fill="x")
-                
+        
                 self.canvas2.get_tk_widget().pack(side="top", fill="both", expand=True, padx=8, pady=8)
                 self._pnl_line = None
-            except Exception: logger.exception("fig2 init failed")
+            except Exception:
+                logger.exception("fig2 init failed")
+
 
         # Cumulative Trades (abajo-derecha)
-        tab_trades = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_trades, text="Cumulative Trades (time)")
+        self.tab_trades = ttk.Frame(self.charts_nb, style="Card.TFrame")
+        self.charts_nb.add(self.tab_trades, text="Cumulative Trades (time)")
         self.fig3 = self.ax3 = self.canvas3 = None
         if MATPLOTLIB_OK:
             try:
-                self.fig3 = Figure(figsize=(5,3.2), dpi=100); self.ax3 = self.fig3.add_subplot(111)
-                self.canvas3 = FigureCanvasTkAgg(self.fig3, master=tab_trades)
-
-                self.toolbar3 = NavigationToolbar2Tk(self.canvas3, tab_trades)
-                self.toolbar3.update()
-                self.toolbar3.pack(side="top", fill="x")
-                
+                self.fig3 = Figure(figsize=(5,3.2), dpi=100)
+                self.ax3 = self.fig3.add_subplot(111)
+                self.canvas3 = FigureCanvasTkAgg(self.fig3, master=self.tab_trades)
                 self.canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
                 self._trades_line = None
-            except Exception: logger.exception("fig3 init failed")
-            
-            
+            except Exception:
+                logger.exception("fig3 init failed")
+        
         # Volume over time (abajo-derecha)
-        tab_vol = ttk.Frame(charts_nb, style="Card.TFrame"); charts_nb.add(tab_vol, text="Volume (time)")
+        self.tab_vol = ttk.Frame(self.charts_nb, style="Card.TFrame")
+        self.charts_nb.add(self.tab_vol, text="Volume (time)")
         self.fig4 = self.ax4 = self.canvas4 = None
         if MATPLOTLIB_OK:
             try:
-                self.fig4 = Figure(figsize=(5,3.2), dpi=100); self.ax4 = self.fig4.add_subplot(111)
-                self.canvas4 = FigureCanvasTkAgg(self.fig4, master=tab_vol)
-
-                self.toolbar4 = NavigationToolbar2Tk(self.canvas4, tab_vol)
-                self.toolbar4.update()
-                self.toolbar4.pack(side="top", fill="x")
-                
+                self.fig4 = Figure(figsize=(5,3.2), dpi=100)
+                self.ax4 = self.fig4.add_subplot(111)
+                self.canvas4 = FigureCanvasTkAgg(self.fig4, master=self.tab_vol)
                 self.canvas4.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
                 self._vol_tsla_line = None
                 self._vol_nvda_line = None
                 self._vol_other_line = None
@@ -1278,6 +1298,119 @@ class TradesApp(tk.Tk):
                     logger.exception("CSV export failed"); messagebox.showerror("Export CSV", f"Error:\n{e}")
         except Exception:
             logger.exception("export_csv outer failed")
+            
+        
+
+    def toggle_simple_view(self):
+        """Alterna entre vista completa y vista simplificada solo con Cumulative PnL."""
+        try:
+            if not self._simple_mode:
+                # ================== MODO SIMPLE ==================
+                self._simple_mode = True
+                self.btn_simple.config(text="Vista completa")
+
+                # 1) Ocultar highlight, filtros y tabla (dejamos KPIs)
+                try:
+                    for frame in (self.hl_card, self.filters_card, self.table_card):
+                        if frame.winfo_ismapped():
+                            frame.pack_forget()
+                except Exception:
+                    logger.exception("simple_view: pack_forget top cards failed")
+
+                # 2) Ocultar summaries de la izquierda (solo charts abajo)
+                try:
+                    panes = self.bottom_split.panes()
+                    if str(self.left_summary) in panes:
+                        self.bottom_split.forget(self.left_summary)
+                except Exception:
+                    logger.exception("simple_view: forget left_summary failed")
+
+                # 3) Ajustar el reparto vertical:
+                #    - arriba: left_frame NO expande (solo ocupa controles + KPIs)
+                #    - abajo: bottom_split SÍ expande (gráfico grande)
+                try:
+                    # reempacar left_frame
+                    self.left_frame.pack_forget()
+                    self.left_frame.pack(fill=tk.X, expand=False, padx=12, pady=8)
+
+                    # reempacar bottom_split
+                    self.bottom_split.pack_forget()
+                    self.bottom_split.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+                except Exception:
+                    logger.exception("simple_view: repack left_frame/bottom_split failed")
+
+                # 4) Dejar solo la pestaña de Cumulative PnL
+                try:
+                    self.charts_nb.tab(self.tab_trades, state="hidden")
+                    self.charts_nb.tab(self.tab_vol, state="hidden")
+                    self.charts_nb.select(self.tab_cum)
+                except Exception:
+                    logger.exception("simple_view: hide other chart tabs failed")
+
+
+            else:
+                # ================== VISTA COMPLETA ==================
+                self._simple_mode = False
+                self.btn_simple.config(text="Vista PnL simple")
+
+                # 1) Restaurar reparto vertical original:
+                #    - left_frame expande (tabla grande)
+                #    - bottom_split NO expande (bloque de abajo más pequeño)
+                try:
+                    self.left_frame.pack_forget()
+                    self.left_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+                    self.bottom_split.pack_forget()
+                    self.bottom_split.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
+                except Exception:
+                    logger.exception("full_view: repack left_frame/bottom_split failed")
+
+                # 2) Restaurar top cards en el orden original
+                try:
+                    # Los quitamos para garantizar el orden
+                    for frame in (self.hl_card, self.filters_card, self.table_card, self.kpi_card):
+                        try:
+                            frame.pack_forget()
+                        except Exception:
+                            pass
+
+                    self.hl_card.pack(fill=tk.X, padx=4, pady=(0, 8))
+                    self.filters_card.pack(fill=tk.X, padx=4, pady=(0, 8))
+                    self.table_card.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 8))
+                    self.kpi_card.pack(fill=tk.X, padx=4, pady=(0, 6))
+                except Exception:
+                    logger.exception("full_view: restore top cards failed")
+
+                # 3) Restaurar split inferior: summaries (2/3) + charts (1/3)
+                try:
+                    panes = self.bottom_split.panes()
+
+                    # Quitar lo que haya y volver a añadir en orden correcto
+                    for pane in list(panes):
+                        try:
+                            self.bottom_split.forget(pane)
+                        except Exception:
+                            pass
+
+                    self.bottom_split.add(self.left_summary, weight=2)
+                    self.bottom_split.add(self.right_charts, weight=1)
+                    
+                
+                except Exception:
+                    logger.exception("full_view: restore bottom_split failed")
+                    
+                # Restaurar también las otras pestañas de charts
+                try:
+                    self.charts_nb.tab(self.tab_trades, state="normal")
+                    self.charts_nb.tab(self.tab_vol, state="normal")
+                except Exception:
+                    logger.exception("full_view: show other chart tabs failed")
+
+
+        except Exception:
+            logger.exception("toggle_simple_view failed")
+
+
         
 
     

@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox, filedialog
 import logging, os, json, math
 from datetime import datetime
 import matplotlib.dates as mdates
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
 
 from lm.utils.numbers import safe_float, safe_int, signed_text
 from lm.utils.debounce import Debouncer
@@ -314,7 +316,13 @@ class TradesApp(tk.Tk):
             try:
                 self.fig2 = Figure(figsize=(5,3.2), dpi=100); self.ax2 = self.fig2.add_subplot(111)
                 self.canvas2 = FigureCanvasTkAgg(self.fig2, master=tab_cum)
-                self.canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+                
+                # Toolbar — debe ir dentro de la pestaña tab_cum
+                self.toolbar2 = NavigationToolbar2Tk(self.canvas2, tab_cum)
+                self.toolbar2.update()
+                self.toolbar2.pack(side="top", fill="x")
+                
+                self.canvas2.get_tk_widget().pack(side="top", fill="both", expand=True, padx=8, pady=8)
                 self._pnl_line = None
             except Exception: logger.exception("fig2 init failed")
 
@@ -325,7 +333,13 @@ class TradesApp(tk.Tk):
             try:
                 self.fig3 = Figure(figsize=(5,3.2), dpi=100); self.ax3 = self.fig3.add_subplot(111)
                 self.canvas3 = FigureCanvasTkAgg(self.fig3, master=tab_trades)
+
+                self.toolbar3 = NavigationToolbar2Tk(self.canvas3, tab_trades)
+                self.toolbar3.update()
+                self.toolbar3.pack(side="top", fill="x")
+                
                 self.canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
                 self._trades_line = None
             except Exception: logger.exception("fig3 init failed")
             
@@ -337,7 +351,13 @@ class TradesApp(tk.Tk):
             try:
                 self.fig4 = Figure(figsize=(5,3.2), dpi=100); self.ax4 = self.fig4.add_subplot(111)
                 self.canvas4 = FigureCanvasTkAgg(self.fig4, master=tab_vol)
+
+                self.toolbar4 = NavigationToolbar2Tk(self.canvas4, tab_vol)
+                self.toolbar4.update()
+                self.toolbar4.pack(side="top", fill="x")
+                
                 self.canvas4.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
                 self._vol_tsla_line = None
                 self._vol_nvda_line = None
                 self._vol_other_line = None
@@ -867,6 +887,7 @@ class TradesApp(tk.Tk):
             self.ax2.set_xlim(start_day, end_day)
             self.fig2.tight_layout()
             self.canvas2.draw_idle()
+            
     
         except Exception:
             # trimmed logging on hot path
